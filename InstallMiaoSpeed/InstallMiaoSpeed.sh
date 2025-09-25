@@ -1,71 +1,78 @@
 
-#!/bin/sh
+#!/bin/bash
 # ============================================================
-# MiaoSpeed 后端 一键部署脚本 (OpenWrt / Linux 通用)
-# 支持架构: x86_64 专用
+# MiaoSpeed 后端 一键部署脚本
+# 支持系统: OpenWrt / Debian / Ubuntu (x86_64)
 # Github: https://github.com/airportr/miaospeed
 # ============================================================
 
-INSTALL_DIR="/opt/miaospeed"      # 安装目录
+INSTALL_DIR="/opt/miaospeed"
 LOG_FILE="${INSTALL_DIR}/miaospeed.log"
 SERVICE_NAME="miaospeed"
+BIN_NAME="miaospeed-linux-amd64" # 固定文件名，不拼接版本号
 
-# 检查 root 权限
+# ---------- 检查 root 权限 ----------
 if [ "$(id -u)" -ne 0 ]; then
   echo "❌ 请使用 root 用户执行此脚本"
   exit 1
 fi
 
-# 检查网络连通性
-if ! ping -c 1 github.com >/dev/null 2>&1; then
-  echo "❌ 无法连接 GitHub，请检查网络或 DNS 设置"
-  echo "建议测试命令: ping github.com"
+# ---------- 检查 CPU 架构 ----------
+ARCH=$(uname -m)
+if [ "$ARCH" != "x86_64" ]; then
+  echo "❌ 当前架构为 $ARCH，本脚本仅支持 x86_64"
   exit 1
 fi
 
-# 检查软件包管理器
-if command -v opkg >/dev/null 2>&1; then
-  PKG_MANAGER="opkg"
-elif command -v apt-get >/dev/null 2>&1; then
-  PKG_MANAGER="apt-get"
+# ---------- 检测系统类型 ----------
+if [ -f "/etc/openwrt_release" ]; then
+  OS_TYPE="openwrt"
+elif [ -f "/etc/os-release" ]; then
+  # 从 os-release 中读取系统 ID
+  OS_ID=$(grep -E '^ID=' /etc/os-release | cut -d '=' -f2 | tr -d '"')
+  if [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
+    OS_TYPE="debian"
+  else
+    OS_TYPE="other"
+  fi
 else
-  echo "❌ 未检测到可用的软件包管理器 (opkg 或 apt-get)"
-  echo "请手动安装 wget curl unzip 后重试"
-  exit 1
+  OS_TYPE="other"
 fi
 
-# 安装依赖，并处理安装失败情况
+echo "检测到系统类型: $OS_TYPE"
+
+# ---------- 检查并安装依赖 ----------
 echo "[1/9] 检查并安装基础依赖 (wget curl unzip)..."
-if [ "$PKG_MANAGER" = "opkg" ]; then
-  if ! opkg update; then
-    echo "❌ opkg update 失败，请检查 OpenWrt 软件源配置或网络连通性"
-    echo "可参考命令: nslookup downloads.openwrt.org"
-    exit 1
-  fi
-  opkg install wget curl unzip || {
-    echo "❌ 依赖安装失败，请检查磁盘空间或软件源"
-    exit 1
-  }
+
+if [ "$OS_TYPE" = "openwrt" ]; then
+  opkg update
+  opkg install wget curl unzip
+elif [ "$OS_TYPE" = "debian" ]; then
+  apt-get update
+  apt-get install -y wget curl unzip
 else
-  if ! apt-get update; then
-    echo "❌ apt-get update 失败，请检查系统网络或 DNS 配置"
-    exit 1
-  fi
-  apt-get install -y wget curl unzip || {
-    echo "❌ 依赖安装失败，请检查磁盘空间或软件源"
-    exit 1
-  }
+  echo "⚠️ 无法确定系统类型，请手动确认 wget curl unzip 是否已安装"
 fi
 
-# 获取 GitHub 最新版本
+# 检查 netstat 是否存在，否则安装 net-tools
+if ! command -v netstat &>/dev/null; then
+  echo "[1.1] netstat 未安装，正在安装 net-tools..."
+  if [ "$OS_TYPE" = "debian" ]; then
+    apt-get install -y net-tools
+  else
+    echo "⚠️ 请手动安装 net-tools 以便检测端口状态"
+  fi
+fi
+
+# ---------- 获取 GitHub 最新版本 ----------
 echo "[2/9] 获取 GitHub 最新版本..."
 LATEST_VERSION=$(curl -fsSL https://api.github.com/repos/airportr/miaospeed/releases/latest | grep tag_name | cut -d '"' -f4)
 if [ -z "$LATEST_VERSION" ]; then
-  echo "⚠️ 无法获取最新版本，将使用默认版本 v1.0.0"
-  LATEST_VERSION="v1.0.0"
+  echo "⚠️ 无法获取最新版本，将使用默认版本 1.0.0"
+  LATEST_VERSION="1.0.0"
 fi
 
-# 用户输入
+# ---------- 用户输入 ----------
 echo "====== MiaoSpeed 后端部署 ======"
 read -p "请输入 MiaoSpeed 版本号 (默认: ${LATEST_VERSION}): " MIAOSPEED_VERSION
 MIAOSPEED_VERSION=${MIAOSPEED_VERSION:-$LATEST_VERSION}
@@ -99,10 +106,16 @@ USE_MMDB=${USE_MMDB:-n}
 
 echo ""
 echo "====== 防火墙策略选择 ======"
-echo "1) 自动放行端口 ${PORT}（外部可直接访问）"
-echo "2) 不配置防火墙（后期通过端口转发/NAT/反代实现）"
-read -p "请选择防火墙模式 (1/2 默认2): " FIREWALL_MODE
-FIREWALL_MODE=${FIREWALL_MODE:-2}
+echo "1) 不配置防火墙（Debian/Ubuntu 请选择此项）"
+echo "2) 自动放行端口 ${PORT}（仅 OpenWrt 可用，但 OpenWrt 依旧推荐不配置防火墙）"
+read -p "请选择防火墙模式 (1/2 默认1): " FIREWALL_MODE
+FIREWALL_MODE=${FIREWALL_MODE:-1}
+
+# ---- 防护措施：Debian/Ubuntu 选了 2 也强制回退为 1 ----
+if [ "$OS_TYPE" != "openwrt" ] && [ "$FIREWALL_MODE" = "2" ]; then
+  echo "⚠️ 当前系统不支持自动配置防火墙，已自动切换为模式 1"
+  FIREWALL_MODE=1
+fi
 
 echo ""
 echo "====== 启动管理方式选择 ======"
@@ -113,28 +126,31 @@ SERVICE_MODE=${SERVICE_MODE:-1}
 
 echo "====== 配置完成，准备安装 ======"
 
-# 创建目录
+# ---------- 安装前清理旧文件 ----------
+if [ -d "$INSTALL_DIR" ]; then
+  echo "⚠️ 检测到已有旧安装文件，是否清理？(y/n 默认 y): "
+  read CLEAN_OLD
+  CLEAN_OLD=${CLEAN_OLD:-y}
+  if [ "$CLEAN_OLD" = "y" ]; then
+    systemctl stop miaospeed 2>/dev/null
+    rm -rf "$INSTALL_DIR"
+    echo "旧安装文件已清理"
+  fi
+fi
+
+# ---------- 创建目录 ----------
 mkdir -p "${INSTALL_DIR}"
 cd "${INSTALL_DIR}" || exit 1
 
-# 检测架构
-ARCH=$(uname -m)
-if [ "$ARCH" != "x86_64" ]; then
-  echo "❌ 当前架构为 $ARCH，本脚本仅支持 x86_64"
-  exit 1
-fi
-
-# 下载 MiaoSpeed 二进制
-BIN_NAME="miaospeed-linux-amd64-${MIAOSPEED_VERSION}"
+# ---------- 下载 MiaoSpeed 二进制 ----------
 DOWNLOAD_URL="https://github.com/airportr/miaospeed/releases/download/${MIAOSPEED_VERSION}/${BIN_NAME}.tar.gz"
-
 echo "[3/9] 下载 MiaoSpeed ${MIAOSPEED_VERSION}..."
 wget -O "${BIN_NAME}.tar.gz" "${DOWNLOAD_URL}" || {
   echo "❌ 下载失败，请检查网络或版本号是否正确"
   exit 1
 }
 
-# 解压并赋权
+# ---------- 解压并赋权 ----------
 echo "[4/9] 解压文件..."
 tar -zxvf "${BIN_NAME}.tar.gz" || {
   echo "❌ 解压失败"
@@ -142,11 +158,10 @@ tar -zxvf "${BIN_NAME}.tar.gz" || {
 }
 chmod +x "${BIN_NAME}"
 
-# 防火墙配置
+# ---------- 配置防火墙 ----------
 if [ "$FIREWALL_MODE" = "1" ]; then
-  echo "[5/9] 配置防火墙规则，持久化放行端口 ${PORT}..."
-  if command -v fw4 >/dev/null 2>&1; then
-    echo "检测到 nftables (fw4)"
+  if [ "$OS_TYPE" = "openwrt" ]; then
+    echo "[5/9] OpenWrt 自动配置防火墙规则..."
     uci add firewall rule
     uci set firewall.@rule[-1].name="MiaoSpeed_${PORT}"
     uci set firewall.@rule[-1].src='wan'
@@ -156,21 +171,16 @@ if [ "$FIREWALL_MODE" = "1" ]; then
     uci commit firewall
     /etc/init.d/firewall restart
   else
-    echo "检测到 iptables (fw3)"
-    uci add firewall rule
-    uci set firewall.@rule[-1].name="MiaoSpeed_${PORT}"
-    uci set firewall.@rule[-1].src='wan'
-    uci set firewall.@rule[-1].dest_port="${PORT}"
-    uci set firewall.@rule[-1].proto='tcp udp'
-    uci set firewall.@rule[-1].target='ACCEPT'
-    uci commit firewall
-    /etc/init.d/firewall restart
+    echo "[5/9] Debian/Ubuntu 系统无法使用 uci，请手动放行端口"
+    echo "    示例命令:"
+    echo "      iptables -I INPUT -p tcp --dport ${PORT} -j ACCEPT"
+    echo "      iptables -I INPUT -p udp --dport ${PORT} -j ACCEPT"
   fi
 else
-  echo "[5/9] 跳过防火墙配置，后续可手动添加端口转发或 NAT"
+  echo "[5/9] 跳过自动防火墙配置，请确保端口 ${PORT} 可访问"
 fi
 
-# 构建启动命令
+# ---------- 构建启动命令 ----------
 CMD="${INSTALL_DIR}/${BIN_NAME} server \
   -mtls \
   -verbose \
@@ -191,33 +201,8 @@ if [ "$USE_MMDB" = "y" ] || [ "$USE_MMDB" = "Y" ]; then
   CMD="${CMD} -mmdb GeoLite2-ASN.mmdb,GeoLite2-City.mmdb"
 fi
 
-# 配置 procd 或 systemd
-if [ "$SERVICE_MODE" = "1" ]; then
-  echo "[6/9] 创建 procd 启动脚本..."
-  INIT_FILE="/etc/init.d/${SERVICE_NAME}"
-  cat > "$INIT_FILE" <<EOF
-#!/bin/sh /etc/rc.common
-# MiaoSpeed Procd Service
-START=95
-STOP=10
-
-USE_PROCD=1
-PROG="${CMD}"
-SERVICE_DAEMONIZE=1
-SERVICE_WRITE_PID=1
-PID_FILE=/var/run/${SERVICE_NAME}.pid
-
-start_service() {
-    procd_open_instance
-    procd_set_param command ${CMD}
-    procd_set_param respawn
-    procd_close_instance
-}
-EOF
-  chmod +x "$INIT_FILE"
-  /etc/init.d/${SERVICE_NAME} enable
-  /etc/init.d/${SERVICE_NAME} start
-else
+# ---------- 配置启动方式 ----------
+if [ "$SERVICE_MODE" = "2" ]; then
   echo "[6/9] 创建 systemd 服务..."
   SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
   cat > "$SERVICE_FILE" <<EOF
@@ -237,51 +222,51 @@ StandardError=append:$INSTALL_DIR/miaospeed-error.log
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable ${SERVICE_NAME}
-  systemctl start ${SERVICE_NAME}
-fi
 
-sleep 2
-
-# 检查运行状态
-echo "[7/9] 检查服务状态..."
-netstat -tulnp | grep "${PORT}" >/dev/null 2>&1
-if [ $? -eq 0 ]; then
-  echo "✅ MiaoSpeed 启动成功!"
-  echo "访问地址: ws://<公网IP或域名>:${PORT}${PATH_WS}"
+  # 检查 systemd 文件是否存在
+  if [ -f "$SERVICE_FILE" ]; then
+    systemctl daemon-reload
+    systemctl enable ${SERVICE_NAME}
+    systemctl restart ${SERVICE_NAME}
+  else
+    echo "❌ 未找到 systemd 配置文件，请检查是否生成成功"
+  fi
 else
-  echo "❌ 启动失败，请检查日志: ${LOG_FILE}"
+  echo "[6/9] OpenWrt 将使用 procd 进行管理，此处略过。"
 fi
 
-# 完成提示
+# ---------- 检查运行状态 ----------
+echo "[7/9] 检查服务状态..."
+if command -v netstat &>/dev/null; then
+  netstat -tunlp | grep "${PORT}" && echo "✅ MiaoSpeed 端口 ${PORT} 正在监听"
+else
+  echo "⚠️ 无法检测端口状态，请手动确认 ${PORT} 是否监听中"
+fi
+
+# ---------- 完成提示 ----------
 echo ""
 echo "====== 部署完成 ======"
-echo "服务管理:"
-if [ "$SERVICE_MODE" = "1" ]; then
-  echo "  重启服务: /etc/init.d/${SERVICE_NAME} restart"
-  echo "  停止服务: /etc/init.d/${SERVICE_NAME} stop"
-  echo "  查看状态: /etc/init.d/${SERVICE_NAME} status"
+echo "服务管理命令:"
+if [ "$SERVICE_MODE" = "2" ]; then
+  echo "  systemctl restart ${SERVICE_NAME}   # 重启服务"
+  echo "  systemctl stop ${SERVICE_NAME}      # 停止服务"
+  echo "  systemctl status ${SERVICE_NAME}    # 查看状态"
 else
-  echo "  重启服务: systemctl restart ${SERVICE_NAME}"
-  echo "  停止服务: systemctl stop ${SERVICE_NAME}"
-  echo "  查看状态: systemctl status ${SERVICE_NAME}"
+  echo "  /etc/init.d/${SERVICE_NAME} restart # 重启服务 (OpenWrt)"
+  echo "  /etc/init.d/${SERVICE_NAME} stop    # 停止服务 (OpenWrt)"
 fi
 
 echo ""
 echo "日志管理:"
-echo "  查看日志: tail -f ${LOG_FILE}"
-echo "  清理日志: echo '' > ${LOG_FILE}"
+echo "  tail -f ${LOG_FILE}                 # 实时查看日志"
+echo "  echo '' > ${LOG_FILE}               # 清空日志"
+
+if [ "$OS_TYPE" = "debian" ]; then
+  echo ""
+  echo "Debian/Ubuntu 系统需手动放行端口示例:"
+  echo "  iptables -I INPUT -p tcp --dport ${PORT} -j ACCEPT"
+  echo "  iptables -I INPUT -p udp --dport ${PORT} -j ACCEPT"
+fi
 
 echo ""
-echo "防火墙/端口转发提示:"
-echo "  如果选择了模式 2，可通过以下方式配置端口转发:"
-echo "  OpenWrt Web 界面: 网络 -> 防火墙 -> 端口转发"
-echo "  或使用 UCI 命令行配置:"
-echo "    uci add firewall redirect"
-echo "    uci set firewall.@redirect[-1].src='wan'"
-echo "    uci set firewall.@redirect[-1].src_dport='6699'"
-echo "    uci set firewall.@redirect[-1].dest_ip='192.168.1.100'"
-echo "    uci set firewall.@redirect[-1].dest_port='6699'"
-echo "    uci set firewall.@redirect[-1].proto='tcp udp'"
-echo "    uci commit firewall && /etc/init.d/firewall restart"
+echo "MiaoSpeed 已部署完成 🎉"
