@@ -1,7 +1,7 @@
 
 #!/bin/bash
 # ============================================================
-# MiaoSpeed 后端 一键部署脚本
+# MiaoSpeed 后端 一键部署 / 卸载脚本
 # 支持系统: OpenWrt / Debian / Ubuntu (x86_64)
 # Github: https://github.com/airportr/miaospeed
 # ============================================================
@@ -9,7 +9,8 @@
 INSTALL_DIR="/opt/miaospeed"
 LOG_FILE="${INSTALL_DIR}/miaospeed.log"
 SERVICE_NAME="miaospeed"
-BIN_NAME="miaospeed-linux-amd64" # 固定文件名，不拼接版本号
+BIN_ORIGIN="miaospeed-linux-amd64"  # 官方下载文件
+BIN_NAME="miaospeed"                # 运行文件，进程名统一为 miaospeed
 
 # ---------- 检查 root 权限 ----------
 if [ "$(id -u)" -ne 0 ]; then
@@ -28,7 +29,6 @@ fi
 if [ -f "/etc/openwrt_release" ]; then
   OS_TYPE="openwrt"
 elif [ -f "/etc/os-release" ]; then
-  # 从 os-release 中读取系统 ID
   OS_ID=$(grep -E '^ID=' /etc/os-release | cut -d '=' -f2 | tr -d '"')
   if [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
     OS_TYPE="debian"
@@ -41,9 +41,39 @@ fi
 
 echo "检测到系统类型: $OS_TYPE"
 
+# ---------- 卸载逻辑 ----------
+if [ "$1" = "--uninstall" ]; then
+  echo "====== 卸载 MiaoSpeed ======"
+  
+  # 停止 systemd 服务
+  if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
+    systemctl stop ${SERVICE_NAME}
+    systemctl disable ${SERVICE_NAME}
+    rm -f /etc/systemd/system/${SERVICE_NAME}.service
+    systemctl daemon-reload
+    echo "✔️ 已删除 systemd 服务"
+  fi
+
+  # 停止 procd 服务
+  if [ -f "/etc/init.d/${SERVICE_NAME}" ]; then
+    /etc/init.d/${SERVICE_NAME} stop
+    /etc/init.d/${SERVICE_NAME} disable
+    rm -f /etc/init.d/${SERVICE_NAME}
+    echo "✔️ 已删除 procd 服务脚本"
+  fi
+
+  # 删除程序文件及日志
+  if [ -d "$INSTALL_DIR" ]; then
+    rm -rf "$INSTALL_DIR"
+    echo "✔️ 已删除程序文件和日志"
+  fi
+
+  echo "====== MiaoSpeed 已完全卸载 ======"
+  exit 0
+fi
+
 # ---------- 检查并安装依赖 ----------
 echo "[1/9] 检查并安装基础依赖 (wget curl unzip)..."
-
 if [ "$OS_TYPE" = "openwrt" ]; then
   opkg update
   opkg install wget curl unzip
@@ -54,7 +84,7 @@ else
   echo "⚠️ 无法确定系统类型，请手动确认 wget curl unzip 是否已安装"
 fi
 
-# 检查 netstat 是否存在，否则安装 net-tools
+# 检查 netstat 是否存在
 if ! command -v netstat &>/dev/null; then
   echo "[1.1] netstat 未安装，正在安装 net-tools..."
   if [ "$OS_TYPE" = "debian" ]; then
@@ -107,11 +137,10 @@ USE_MMDB=${USE_MMDB:-n}
 echo ""
 echo "====== 防火墙策略选择 ======"
 echo "1) 不配置防火墙（Debian/Ubuntu 请选择此项）"
-echo "2) 自动放行端口 ${PORT}（仅 OpenWrt 可用，但 OpenWrt 依旧推荐不配置防火墙）"
+echo "2) 自动放行端口 ${PORT}（仅 OpenWrt 可用）"
 read -p "请选择防火墙模式 (1/2 默认1): " FIREWALL_MODE
 FIREWALL_MODE=${FIREWALL_MODE:-1}
 
-# ---- 防护措施：Debian/Ubuntu 选了 2 也强制回退为 1 ----
 if [ "$OS_TYPE" != "openwrt" ] && [ "$FIREWALL_MODE" = "2" ]; then
   echo "⚠️ 当前系统不支持自动配置防火墙，已自动切换为模式 1"
   FIREWALL_MODE=1
@@ -126,13 +155,13 @@ SERVICE_MODE=${SERVICE_MODE:-1}
 
 echo "====== 配置完成，准备安装 ======"
 
-# ---------- 安装前清理旧文件 ----------
+# ---------- 清理旧文件 ----------
 if [ -d "$INSTALL_DIR" ]; then
   echo "⚠️ 检测到已有旧安装文件，是否清理？(y/n 默认 y): "
   read CLEAN_OLD
   CLEAN_OLD=${CLEAN_OLD:-y}
   if [ "$CLEAN_OLD" = "y" ]; then
-    systemctl stop miaospeed 2>/dev/null
+    systemctl stop ${SERVICE_NAME} 2>/dev/null
     rm -rf "$INSTALL_DIR"
     echo "旧安装文件已清理"
   fi
@@ -142,20 +171,21 @@ fi
 mkdir -p "${INSTALL_DIR}"
 cd "${INSTALL_DIR}" || exit 1
 
-# ---------- 下载 MiaoSpeed 二进制 ----------
-DOWNLOAD_URL="https://github.com/airportr/miaospeed/releases/download/${MIAOSPEED_VERSION}/${BIN_NAME}-${MIAOSPEED_VERSION}.tar.gz"
+# ---------- 下载并重命名 ----------
+DOWNLOAD_URL="https://github.com/airportr/miaospeed/releases/download/${MIAOSPEED_VERSION}/${BIN_ORIGIN}-${MIAOSPEED_VERSION}.tar.gz"
 echo "[3/9] 下载 MiaoSpeed ${MIAOSPEED_VERSION}..."
-wget -O "${BIN_NAME}.tar.gz" "${DOWNLOAD_URL}" || {
+wget -O "${BIN_ORIGIN}.tar.gz" "${DOWNLOAD_URL}" || {
   echo "❌ 下载失败，请检查网络或版本号是否正确"
   exit 1
 }
 
-# ---------- 解压并赋权 ----------
+# ---------- 解压并将文件重命名为 miaospeed ----------
 echo "[4/9] 解压文件..."
-tar -zxvf "${BIN_NAME}.tar.gz" || {
+tar -zxvf "${BIN_ORIGIN}.tar.gz" || {
   echo "❌ 解压失败"
   exit 1
 }
+mv "${BIN_ORIGIN}" "${BIN_NAME}"
 chmod +x "${BIN_NAME}"
 
 # ---------- 配置防火墙 ----------
@@ -223,16 +253,45 @@ StandardError=append:$INSTALL_DIR/miaospeed-error.log
 WantedBy=multi-user.target
 EOF
 
-  # 检查 systemd 文件是否存在
-  if [ -f "$SERVICE_FILE" ]; then
-    systemctl daemon-reload
-    systemctl enable ${SERVICE_NAME}
-    systemctl restart ${SERVICE_NAME}
-  else
-    echo "❌ 未找到 systemd 配置文件，请检查是否生成成功"
-  fi
+  systemctl daemon-reload
+  systemctl enable ${SERVICE_NAME}
+  systemctl restart ${SERVICE_NAME}
+
+elif [ "$OS_TYPE" = "openwrt" ] && [ "$SERVICE_MODE" = "1" ]; then
+  echo "[6/9] 创建 procd 启动脚本..."
+  cat > /etc/init.d/${SERVICE_NAME} <<EOF
+#!/bin/sh /etc/rc.common
+# MiaoSpeed 后端 Procd 启动脚本
+
+START=95
+STOP=10
+
+USE_PROCD=1
+PROG=${INSTALL_DIR}/${BIN_NAME}
+LOG_FILE=${LOG_FILE}
+PROG_ARGS="server -mtls -verbose -bind 0.0.0.0:${PORT} -allowip 0.0.0.0/0 -path ${PATH_WS} -token ${TOKEN} -connthread ${CONNTHREAD} -tasklimit ${TASKLIMIT}"
+
+start_service() {
+    procd_open_instance
+    procd_set_param command \$PROG \$PROG_ARGS
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param file \$LOG_FILE
+    procd_close_instance
+}
+
+stop_service() {
+    echo "Stopping MiaoSpeed..."
+}
+EOF
+
+  chmod +x /etc/init.d/${SERVICE_NAME}
+  /etc/init.d/${SERVICE_NAME} enable
+  /etc/init.d/${SERVICE_NAME} start
+  echo "✅ 已生成 procd 启动脚本，并启用开机自启"
 else
-  echo "[6/9] OpenWrt 将使用 procd 进行管理，此处略过。"
+  echo "[6/9] 未选择有效启动方式，请检查配置"
 fi
 
 # ---------- 检查运行状态 ----------
@@ -270,3 +329,6 @@ fi
 
 echo ""
 echo "MiaoSpeed 已部署完成 🎉"
+echo ""
+echo "如需卸载，请执行:"
+echo "  bash <(curl -fsSL https://github.com/xxx/InstallMiaoSpeed.sh) --uninstall"
