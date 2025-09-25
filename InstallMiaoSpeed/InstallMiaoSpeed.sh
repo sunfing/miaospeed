@@ -261,7 +261,7 @@ INSTALL_DIR="/opt/miaospeed"
 BIN_FILE="${INSTALL_DIR}/miaospeed"
 SERVICE_NAME="miaospeed"
 
-CURRENT_VERSION=$($BIN_FILE -v | grep "MiaoSpeed version" | awk '{print $3}')
+CURRENT_VERSION=$($BIN_FILE -version 2>/dev/null | grep '^version:' | awk '{print $2}')
 LATEST_VERSION=$(curl -fsSL https://api.github.com/repos/airportr/miaospeed/releases/latest | grep tag_name | cut -d '"' -f4)
 
 if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
@@ -312,7 +312,7 @@ fi
 # 12. 检查服务状态
 # ============================================================
 echo "[7/9] 检查服务状态..."
-if command -v netstat &>/dev/null; 键，然后
+if command -v netstat &>/dev/null; then
   netstat -tunlp | grep "${PORT}" && echo "✅ MiaoSpeed 端口 ${PORT} 正在监听"
 else
   echo "⚠️ 无法检测端口状态，请手动确认 ${PORT} 是否监听中"
@@ -324,7 +324,7 @@ fi
 echo ""
 echo "====== 部署完成 ======"
 echo "服务管理命令:"
-if [ "$SERVICE_MODE" = "2" ]; then
+if [ "$SERVICE_MODE" = "2" ]; 键，然后
   echo "  systemctl restart ${SERVICE_NAME}   # 重启服务"
   echo "  systemctl stop ${SERVICE_NAME}      # 停止服务"
   echo "  systemctl status ${SERVICE_NAME}    # 查看状态"
