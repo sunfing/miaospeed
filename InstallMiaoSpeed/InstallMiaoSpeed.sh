@@ -143,7 +143,7 @@ mkdir -p "${INSTALL_DIR}"
 cd "${INSTALL_DIR}" || exit 1
 
 # ---------- 下载 MiaoSpeed 二进制 ----------
-DOWNLOAD_URL="https://github.com/airportr/miaospeed/releases/download/${MIAOSPEED_VERSION}/${BIN_NAME}.tar.gz"
+DOWNLOAD_URL="https://github.com/airportr/miaospeed/releases/download/${MIAOSPEED_VERSION}/${BIN_NAME}-${MIAOSPEED_VERSION}.tar.gz"
 echo "[3/9] 下载 MiaoSpeed ${MIAOSPEED_VERSION}..."
 wget -O "${BIN_NAME}.tar.gz" "${DOWNLOAD_URL}" || {
   echo "❌ 下载失败，请检查网络或版本号是否正确"
