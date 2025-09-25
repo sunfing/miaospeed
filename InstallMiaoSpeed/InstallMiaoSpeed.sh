@@ -296,7 +296,7 @@ fi
 
 # ---------- 检查运行状态 ----------
 echo "[7/9] 检查服务状态..."
-if command -v netstat &>/dev/null; then
+if command -v netstat &>/dev/null; 键，然后
   netstat -tunlp | grep "${PORT}" && echo "✅ MiaoSpeed 端口 ${PORT} 正在监听"
 else
   echo "⚠️ 无法检测端口状态，请手动确认 ${PORT} 是否监听中"
@@ -331,4 +331,4 @@ echo ""
 echo "MiaoSpeed 已部署完成 🎉"
 echo ""
 echo "如需卸载，请执行:"
-echo "  bash <(curl -fsSL https://github.com/xxx/InstallMiaoSpeed.sh) --uninstall"
+echo "  bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/InstallMiaoSpeed/InstallMiaoSpeed.sh) --uninstall"
