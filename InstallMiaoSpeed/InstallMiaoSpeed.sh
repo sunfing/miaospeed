@@ -324,7 +324,7 @@ fi
 echo ""
 echo "====== 部署完成 ======"
 echo "服务管理命令:"
-if [ "$SERVICE_MODE" = "2" ]; 键，然后
+if [ "$SERVICE_MODE" = "2" ]; then
   echo "  systemctl restart ${SERVICE_NAME}   # 重启服务"
   echo "  systemctl stop ${SERVICE_NAME}      # 停止服务"
   echo "  systemctl status ${SERVICE_NAME}    # 查看状态"
