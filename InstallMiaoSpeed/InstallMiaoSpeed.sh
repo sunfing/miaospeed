@@ -221,6 +221,10 @@ start_service() {
     procd_set_param file \$LOG_FILE
     procd_close_instance
 }
+restart() {
+    stop
+    start
+}
 EOF
   chmod +x /etc/init.d/${SERVICE_NAME}
   /etc/init.d/${SERVICE_NAME} enable
