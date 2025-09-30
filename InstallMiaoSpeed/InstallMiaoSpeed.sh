@@ -214,7 +214,7 @@ PROG_ARGS="server -mtls -verbose -bind 0.0.0.0:${PORT} -allowip 0.0.0.0/0 -path 
 
 start_service() {
     procd_open_instance
-    procd_set_param command \$PROG \$PROG_ARGS
+    procd_set_param command /bin/sh -c "$PROG $PROG_ARGS >> $LOG_FILE 2>&1"
     procd_set_param respawn
     procd_set_param stdout 1
     procd_set_param stderr 1
