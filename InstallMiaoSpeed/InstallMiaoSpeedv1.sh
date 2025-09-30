@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #================================================================
-# MiaoSpeed 一键安装 / 卸载 / 更新脚本
+# MiaoSpeed 一键安装 / 卸载 / 更新脚本 (最小依赖版)
 # 支持平台: Linux(systemd), OpenWrt(procd), FreeBSD(rc.d), macOS(launchd)
+# 默认安装目录: /opt/miaospeed
 # GitHub：https://github.com/sunfing
 # Telegram：https://t.me/i_chl
 #================================================================
@@ -38,7 +39,7 @@ SERVICE_NAME="miaospeed"
 uninstall() {
     title "卸载 MiaoSpeed"
 
-    # 停止服务
+    # 停止并清理服务
     if command -v systemctl &>/dev/null; then
         systemctl stop $SERVICE_NAME || true
         systemctl disable $SERVICE_NAME || true
@@ -64,7 +65,6 @@ uninstall() {
     info "MiaoSpeed 已卸载完成！"
     exit 0
 }
-
 [[ "${1:-}" == "--uninstall" ]] && uninstall
 
 #-------------------------
@@ -73,7 +73,6 @@ uninstall() {
 title "检测系统信息"
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
-
 case $ARCH in
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
@@ -90,20 +89,26 @@ title "检测网络连通性"
 ping -c1 github.com &>/dev/null || error "无法访问 GitHub，请检查网络或代理！"
 
 #-------------------------
-# 安装依赖
+# 安装依赖 (多分支)
 #-------------------------
 title "安装必要依赖"
-if [[ "$OS" == "linux" ]]; then
-    if command -v apt-get &>/dev/null; then
-        apt-get update -y
-        apt-get install -y curl wget tar unzip cron
-    elif command -v yum &>/dev/null; then
-        yum install -y curl wget tar unzip cronie
-    fi
+if [[ -f /etc/openwrt_release ]]; then
+    info "检测到 OpenWrt，使用 opkg 安装依赖"
+    opkg update
+    opkg install curl wget tar unzip coreutils-nohup
+elif command -v apt-get &>/dev/null; then
+    info "检测到 Debian/Ubuntu，使用 apt-get 安装依赖"
+    apt-get update -y
+    apt-get install -y curl wget tar unzip cron
+elif command -v yum &>/dev/null; then
+    info "检测到 CentOS/AlmaLinux，使用 yum 安装依赖"
+    yum install -y curl wget tar unzip cronie
 elif [[ "$OS" == "freebsd" ]]; then
+    info "检测到 FreeBSD，使用 pkg 安装依赖"
     pkg install -y curl wget bash
 elif [[ "$OS" == "darwin" ]]; then
-    command -v curl >/dev/null || error "请安装 curl (brew install curl)"
+    info "检测到 macOS，请手动确保安装 curl (brew install curl)"
+    command -v curl >/dev/null || error "请安装 curl"
 fi
 
 #-------------------------
@@ -144,18 +149,17 @@ title "配置参数"
 read -rp "请输入监听地址 [默认: 0.0.0.0:6699]: " BIND
 BIND=${BIND:-0.0.0.0:6699}
 
-# 固定默认值
 read -rp "请输入 WebSocket 路径 [默认: /miaospeed]: " PATH
 PATH=${PATH:-/miaospeed}
 
 read -rp "请输入连接 Token [默认: defaulttoken]: " TOKEN
 TOKEN=${TOKEN:-defaulttoken}
 
-cat > "$CONFIG_FILE" <<EOF
-BIND=$BIND
-PATH=$PATH
-TOKEN=$TOKEN
-EOF
+{
+  echo "BIND=$BIND"
+  echo "PATH=$PATH"
+  echo "TOKEN=$TOKEN"
+} > "$CONFIG_FILE"
 
 info "配置已写入 $CONFIG_FILE"
 
@@ -248,47 +252,39 @@ fi
 # 自动更新脚本
 #-------------------------
 title "配置自动更新"
-cat > "$UPDATE_SCRIPT" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-INSTALL_DIR="/opt/miaospeed"
-BIN_DIR="$INSTALL_DIR/bin"
-LINK_BIN="$INSTALL_DIR/miaospeed"
-CONFIG_FILE="$INSTALL_DIR/config.env"
-
-LATEST_URL=$(curl -fsSLI -o /dev/null -w %{url_effective} https://github.com/AirportR/miaospeed/releases/latest)
-LATEST_TAG="${LATEST_URL##*/}"
-
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m)
-case $ARCH in
-    x86_64|amd64) ARCH="amd64" ;;
-    aarch64|arm64) ARCH="arm64" ;;
-    armv7l) ARCH="armv7" ;;
-    *) echo "Unsupported arch"; exit 1 ;;
-esac
-
-FILENAME="miaospeed-${OS}-${ARCH}-${LATEST_TAG}.tar.gz"
-DOWNLOAD_URL="https://github.com/AirportR/miaospeed/releases/download/${LATEST_TAG}/${FILENAME}"
-
-curl -L "$DOWNLOAD_URL" -o /tmp/miaospeed.tar.gz
-tar -xzf /tmp/miaospeed.tar.gz -C "$BIN_DIR"
-rm -f /tmp/miaospeed.tar.gz
-
-REAL_BIN=$(find "$BIN_DIR" -type f -name "miaospeed-*-$ARCH" | tail -n1)
-ln -sf "$REAL_BIN" "$LINK_BIN"
-chmod +x "$REAL_BIN" "$LINK_BIN"
-
-systemctl restart miaospeed 2>/dev/null || true
-/etc/init.d/miaospeed restart 2>/dev/null || true
-service miaospeed restart 2>/dev/null || true
-launchctl unload ~/Library/LaunchAgents/com.miaospeed.plist 2>/dev/null || true
-launchctl load ~/Library/LaunchAgents/com.miaospeed.plist 2>/dev/null || true
-EOF
+{
+echo '#!/usr/bin/env bash'
+echo 'set -euo pipefail'
+echo 'INSTALL_DIR="/opt/miaospeed"'
+echo 'BIN_DIR="$INSTALL_DIR/bin"'
+echo 'LINK_BIN="$INSTALL_DIR/miaospeed"'
+echo 'CONFIG_FILE="$INSTALL_DIR/config.env"'
+echo 'LATEST_URL=$(curl -fsSLI -o /dev/null -w %{url_effective} https://github.com/AirportR/miaospeed/releases/latest)'
+echo 'LATEST_TAG="${LATEST_URL##*/}"'
+echo 'OS=$(uname -s | tr "[:upper:]" "[:lower:]")'
+echo 'ARCH=$(uname -m)'
+echo 'case $ARCH in'
+echo '    x86_64|amd64) ARCH="amd64" ;;'
+echo '    aarch64|arm64) ARCH="arm64" ;;'
+echo '    armv7l) ARCH="armv7" ;;'
+echo '    *) echo "Unsupported arch"; exit 1 ;;'
+echo 'esac'
+echo 'FILENAME="miaospeed-${OS}-${ARCH}-${LATEST_TAG}.tar.gz"'
+echo 'DOWNLOAD_URL="https://github.com/AirportR/miaospeed/releases/download/${LATEST_TAG}/${FILENAME}"'
+echo 'curl -L "$DOWNLOAD_URL" -o /tmp/miaospeed.tar.gz'
+echo 'tar -xzf /tmp/miaospeed.tar.gz -C "$BIN_DIR"'
+echo 'rm -f /tmp/miaospeed.tar.gz'
+echo 'REAL_BIN=$(find "$BIN_DIR" -type f -name "miaospeed-*-$ARCH" | tail -n1)'
+echo 'ln -sf "$REAL_BIN" "$LINK_BIN"'
+echo 'chmod +x "$REAL_BIN" "$LINK_BIN"'
+echo 'systemctl restart miaospeed 2>/dev/null || true'
+echo '/etc/init.d/miaospeed restart 2>/dev/null || true'
+echo 'service miaospeed restart 2>/dev/null || true'
+echo 'launchctl unload ~/Library/LaunchAgents/com.miaospeed.plist 2>/dev/null || true'
+echo 'launchctl load ~/Library/LaunchAgents/com.miaospeed.plist 2>/dev/null || true'
+} > "$UPDATE_SCRIPT"
 chmod +x "$UPDATE_SCRIPT"
 
-# 配置定时任务
 (crontab -l 2>/dev/null | grep -v "$UPDATE_SCRIPT" ; echo "0 4 * * * $UPDATE_SCRIPT >/dev/null 2>&1") | crontab -
 
 #-------------------------
@@ -297,4 +293,4 @@ chmod +x "$UPDATE_SCRIPT"
 title "安装完成"
 info "服务已启动，当前配置："
 cat "$CONFIG_FILE"
-info "卸载命令: bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/InstallMiaoSpeed/InstallMiaoSpeedv1.sh) --uninstall"
+info "卸载命令: bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/InstallMiaoSpeed/InstallMiaoSpeed.sh) --uninstall"
