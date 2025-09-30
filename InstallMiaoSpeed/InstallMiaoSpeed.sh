@@ -1,8 +1,7 @@
-
 #!/bin/bash
 # ============================================================
-# MiaoSpeed 后端 一键部署/卸载/自动更新
-# 支持系统: OpenWrt / Debian / Ubuntu (x86_64)
+# MiaoSpeed 测试后端 一键部署/卸载/自动更新
+# 支持系统: Linux AMD64 / ARM64 (含 OpenWrt)
 # GitHub：https://github.com/sunfing
 # Telegram：https://t.me/i_chl
 # ============================================================
@@ -10,7 +9,7 @@
 INSTALL_DIR="/opt/miaospeed"
 LOG_FILE="${INSTALL_DIR}/miaospeed.log"
 SERVICE_NAME="miaospeed"
-BIN_NAME="miaospeed-linux-amd64" # 下载后会重命名为 miaospeed
+BIN_NAME=""
 
 # ============================================================
 # 0. 检查 root 权限
@@ -68,10 +67,19 @@ fi
 # 2. 检查 CPU 架构
 # ============================================================
 ARCH=$(uname -m)
-if [ "$ARCH" != "x86_64" ]; then
-  echo "❌ 当前架构为 $ARCH，本脚本仅支持 x86_64"
-  exit 1
-fi
+case "$ARCH" in
+  x86_64)
+    BIN_NAME="miaospeed-linux-amd64"
+    ;;
+  aarch64|arm64)
+    BIN_NAME="miaospeed-linux-arm64"
+    ;;
+  *)
+    echo "❌ 当前架构 $ARCH 不受支持，请手动确认是否有对应的 MiaoSpeed 版本"
+    exit 1
+    ;;
+esac
+echo "✔️ 检测到架构: $ARCH, 使用二进制: $BIN_NAME"
 
 # ============================================================
 # 3. 检测系统类型
@@ -110,8 +118,8 @@ fi
 echo "[2/9] 获取 GitHub 最新版本..."
 LATEST_VERSION=$(curl -fsSL https://api.github.com/repos/airportr/miaospeed/releases/latest | grep tag_name | cut -d '"' -f4)
 if [ -z "$LATEST_VERSION" ]; then
-  echo "⚠️ 无法获取最新版本，将使用默认版本 1.0.0"
-  LATEST_VERSION="1.0.0"
+  echo "⚠️ 无法获取最新版本，将使用默认版本 4.6.1"
+  LATEST_VERSION="4.6.1"
 fi
 
 # ============================================================
@@ -124,13 +132,18 @@ MIAOSPEED_VERSION=${MIAOSPEED_VERSION:-$LATEST_VERSION}
 read -p "请输入监听端口 (默认: 6699): " PORT
 PORT=${PORT:-6699}
 
-read -p "请输入 WebSocket Path (示例: /abc123xyz): " PATH_WS
+read -p "请输入 WebSocket Path (默认: /miaospeed): " PATH_WS
 PATH_WS=${PATH_WS:-/miaospeed}
 
-read -p "请输入后端连接 Token: " TOKEN
-TOKEN=${TOKEN:-defaultToken123}
+# 自动补全，确保以 "/" 开头
+if [[ "$PATH_WS" != /* ]]; then
+  PATH_WS="/$PATH_WS"
+fi
 
-read -p "请输入 BotID 白名单(逗号分隔, 为空允许所有): " WHITELIST
+read -p "请输入后端连接 Token (默认: defaulttoken):: " TOKEN
+TOKEN=${TOKEN:-defaulttoken}
+
+read -p "请输入 BotID 白名单(英文逗号分隔, 为空允许所有): " WHITELIST
 WHITELIST=${WHITELIST:-""}
 
 read -p "请输入最大并发连接数 (默认: 64): " CONNTHREAD
@@ -150,8 +163,8 @@ USE_MMDB=${USE_MMDB:-n}
 
 echo ""
 echo "====== 启动管理方式选择 ======"
-echo "1) procd (OpenWrt 专用)"
-echo "2) systemd (标准 Linux)"
+echo "1) systemd (标准 Linux)"
+echo "2) procd (OpenWrt 专用)"
 read -p "请选择服务管理方式 (1/2 默认: 1): " SERVICE_MODE
 SERVICE_MODE=${SERVICE_MODE:-1}
 
@@ -199,7 +212,7 @@ if [ "$USE_MMDB" = "y" ] || [ "$USE_MMDB" = "Y" ]; then
 fi
 
 # ---------- systemd ----------
-if [ "$SERVICE_MODE" = "2" ]; then
+if [ "$SERVICE_MODE" = "1" ]; then
   echo "[5/9] 创建 systemd 服务..."
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
@@ -255,36 +268,49 @@ fi
 echo "[6/9] 生成自动更新脚本..."
 UPDATE_SCRIPT="${INSTALL_DIR}/update.sh"
 
-cat > "$UPDATE_SCRIPT" <<'EOF'
+cat > "$UPDATE_SCRIPT" <<EOF
 #!/bin/sh
 INSTALL_DIR="/opt/miaospeed"
-BIN_FILE="${INSTALL_DIR}/miaospeed"
+BIN_FILE="\${INSTALL_DIR}/miaospeed"
 SERVICE_NAME="miaospeed"
+ARCH=\$(uname -m)
+case "\$ARCH" in
+  x86_64)
+    BIN_NAME="miaospeed-linux-amd64"
+    ;;
+  aarch64|arm64)
+    BIN_NAME="miaospeed-linux-arm64"
+    ;;
+  *)
+    echo "❌ 架构 \$ARCH 不受支持"
+    exit 1
+    ;;
+esac
 
-CURRENT_VERSION=$($BIN_FILE -version 2>/dev/null | grep '^version:' | awk '{print $2}')
-LATEST_VERSION=$(curl -fsSL https://api.github.com/repos/airportr/miaospeed/releases/latest | grep tag_name | cut -d '"' -f4)
+CURRENT_VERSION=\$("\$BIN_FILE" -version 2>/dev/null | grep '^version:' | awk '{print \$2}')
+LATEST_VERSION=\$(curl -fsSL https://api.github.com/repos/airportr/miaospeed/releases/latest | grep tag_name | cut -d '"' -f4)
 
-if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
-  echo "检测到新版本 $LATEST_VERSION，当前版本 $CURRENT_VERSION，开始更新..."
+if [ "\$CURRENT_VERSION" != "\$LATEST_VERSION" ]; then
+  echo "检测到新版本 \$LATEST_VERSION，当前版本 \$CURRENT_VERSION，开始更新..."
 
-  wget -O "${INSTALL_DIR}/miaospeed-new.tar.gz" \
-    "https://github.com/airportr/miaospeed/releases/download/${LATEST_VERSION}/miaospeed-linux-amd64-${LATEST_VERSION}.tar.gz"
+  wget -O "\${INSTALL_DIR}/miaospeed-new.tar.gz" \
+    "https://github.com/airportr/miaospeed/releases/download/\${LATEST_VERSION}/\${BIN_NAME}-\${LATEST_VERSION}.tar.gz"
 
-  cd $INSTALL_DIR
+  cd \$INSTALL_DIR
   tar -zxvf miaospeed-new.tar.gz
-  mv miaospeed-linux-amd64 miaospeed
+  mv \${BIN_NAME} miaospeed
   chmod +x miaospeed
   rm -f miaospeed-new.tar.gz
 
   if command -v systemctl &>/dev/null; then
-    systemctl restart $SERVICE_NAME
+    systemctl restart \$SERVICE_NAME
   else
-    /etc/init.d/$SERVICE_NAME restart
+    /etc/init.d/\$SERVICE_NAME restart
   fi
 
-  echo "✅ MiaoSpeed 已更新至 $LATEST_VERSION 并重启完成"
+  echo "✅ MiaoSpeed 已更新至 \$LATEST_VERSION 并重启完成"
 else
-  echo "当前已是最新版本 $CURRENT_VERSION，无需更新"
+  echo "当前已是最新版本 \$CURRENT_VERSION，无需更新"
 fi
 EOF
 chmod +x "$UPDATE_SCRIPT"
@@ -324,13 +350,14 @@ fi
 echo ""
 echo "====== 部署完成 ======"
 echo "服务管理命令:"
-if [ "$SERVICE_MODE" = "2" ]; then
+if [ "$SERVICE_MODE" = "1" ]; then
   echo "  systemctl restart ${SERVICE_NAME}   # 重启服务"
   echo "  systemctl stop ${SERVICE_NAME}      # 停止服务"
   echo "  systemctl status ${SERVICE_NAME}    # 查看状态"
 else
   echo "  /etc/init.d/${SERVICE_NAME} restart # 重启服务 (OpenWrt)"
   echo "  /etc/init.d/${SERVICE_NAME} stop    # 停止服务 (OpenWrt)"
+  echo "  /etc/init.d/${SERVICE_NAME} status  # 停止服务 (OpenWrt)"
 fi
 
 echo ""
@@ -341,7 +368,7 @@ echo ""
 echo "更新日志:"
 echo "  tail -f ${INSTALL_DIR}/update.log   # 实时查看更新日志"
 echo ""
-echo "MiaoSpeed 已部署完成 🎉"
+echo "  🎉 MiaoSpeed 已部署完成 🎉"
 echo ""
 echo "如需卸载，请执行:"
 echo "  bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/InstallMiaoSpeed/InstallMiaoSpeed.sh) --uninstall"
