@@ -15,7 +15,7 @@ BIN_NAME=""
 # 检查 root 权限
 # ============================================================
 if [ "$(id -u)" -ne 0 ]; then
-  echo "❌ 请使用 root 用户执行此脚本"
+  echo "🟡 请使用 root 用户执行此脚本"
   exit 1
 fi
 
@@ -32,7 +32,7 @@ if [ "$1" = "--uninstall" ]; then
     systemctl disable ${SERVICE_NAME}
     rm -f /etc/systemd/system/${SERVICE_NAME}.service
     systemctl daemon-reload
-    echo "✔️ 已删除 systemd 服务"
+    echo "🟡️ 已删除 systemd 服务"
   fi
 
   # 停止并删除 OpenWrt procd 服务
@@ -40,26 +40,26 @@ if [ "$1" = "--uninstall" ]; then
     /etc/init.d/${SERVICE_NAME} stop
     /etc/init.d/${SERVICE_NAME} disable
     rm -f /etc/init.d/${SERVICE_NAME}
-    echo "✔️ 已删除 procd 启动脚本"
+    echo "🟡️ 已删除 procd 启动脚本"
   fi
 
   # 杀掉残留进程
   OLD_PID=$(pgrep -f "${SERVICE_NAME}")
   if [ -n "$OLD_PID" ]; then
     kill -9 $OLD_PID
-    echo "✔️ 已终止进程 PID: $OLD_PID"
+    echo "🟡️ 已终止进程 PID: $OLD_PID"
   fi
 
   # 删除程序目录
   if [ -d "$INSTALL_DIR" ]; then
     rm -rf "$INSTALL_DIR"
-    echo "✔️ 已删除目录 $INSTALL_DIR"
+    echo "🟡️ 已删除目录 $INSTALL_DIR"
   fi
 
   # 删除自动更新任务
   crontab -l 2>/dev/null | grep -v "$INSTALL_DIR/update.sh" | crontab -
-  echo "✔️ 已清理自动更新定时任务"
-  echo "✅ MiaoSpeed 已完全卸载"
+  echo "🟡️ 已清理自动更新定时任务"
+  echo "🟡 MiaoSpeed 已完全卸载"
   exit 0
 fi
 
@@ -90,13 +90,13 @@ case "$ARCH" in
     BIN_NAME="miaospeed-linux-arm64"
     ;;
   *)
-    echo "❌ 当前架构 $ARCH 不受支持，请手动确认是否有对应的 MiaoSpeed 版本"
+    echo "🟡 当前架构 $ARCH 不受支持，请手动确认是否有对应的 MiaoSpeed 版本"
     exit 1
     ;;
 esac
 
-echo "✔️ 检测到系统类型: $OS_TYPE"
-echo "✔️ 检测到系统架构: $ARCH, 使用二进制: $BIN_NAME"
+echo "🟡️ 检测到系统类型: $OS_TYPE"
+echo "🟡️ 检测到系统架构: $ARCH, 使用二进制: $BIN_NAME"
 
 # ============================================================
 # 检查并安装依赖
@@ -110,7 +110,7 @@ elif [ "$OS_TYPE" = "debian" ]; then
   apt-get update
   apt-get install -y wget curl unzip net-tools cron
 else
-  echo "⚠️ 无法确定系统类型，请手动确认依赖已安装"
+  echo "🟡️ 无法确定系统类型，请手动确认依赖已安装"
 fi
 
 # ============================================================
@@ -120,10 +120,10 @@ echo ""
 echo "====== 获取 GitHub 最新版本 ======"
 LATEST_VERSION=$(curl -fsSL https://api.github.com/repos/airportr/miaospeed/releases/latest | grep tag_name | cut -d '"' -f4)
 if [ -z "$LATEST_VERSION" ]; then
-  echo "⚠️ 无法获取最新版本，将使用默认版本 4.6.1"
+  echo "🟡️ 无法获取最新版本，将使用默认版本 4.6.1"
   LATEST_VERSION="4.6.1"
 else
-  echo "🆕 检测到最新版本: $LATEST_VERSION"
+  echo "🟡 检测到最新版本: $LATEST_VERSION"
 fi
 
 # ============================================================
@@ -166,7 +166,7 @@ PAUSESECOND=${PAUSESECOND:-0}
 read -p "是否启用 mmdb GEOIP 数据库? (y/n 默认: n): " USE_MMDB
 USE_MMDB=${USE_MMDB:-n}
 
-echo "✔️ 参数设置已完成"
+echo "🟡️ 参数设置已完成"
 
 echo ""
 echo "====== 启动管理方式选择 ======"
@@ -181,13 +181,13 @@ SERVICE_MODE=${SERVICE_MODE:-1}
 echo ""
 echo "====== 清理旧安装文件 ======"
 if [ -d "$INSTALL_DIR" ]; then
-  echo "⚠️ 检测到已有旧安装文件，是否清理？(y/n 默认: y): "
+  echo "🟡️ 检测到已有旧安装文件，是否清理？(y/n 默认: y): "
   read CLEAN_OLD
   CLEAN_OLD=${CLEAN_OLD:-y}
   if [ "$CLEAN_OLD" = "y" ]; then
     systemctl stop miaospeed 2>/dev/null
     rm -rf "$INSTALL_DIR"
-    echo "✔️ 旧安装文件已清理"
+    echo "🟡️ 旧安装文件已清理"
   fi
 fi
 
@@ -200,13 +200,13 @@ mkdir -p "${INSTALL_DIR}"
 cd "${INSTALL_DIR}" || exit 1
 
 DOWNLOAD_URL="https://github.com/airportr/miaospeed/releases/download/${MIAOSPEED_VERSION}/${BIN_NAME}-${MIAOSPEED_VERSION}.tar.gz"
-echo "⬇️ 下载 MiaoSpeed ${MIAOSPEED_VERSION}..."
+echo "🟡 下载 MiaoSpeed ${MIAOSPEED_VERSION}..."
 wget -O "${BIN_NAME}.tar.gz" "${DOWNLOAD_URL}" || {
-  echo "❌ 下载失败，请检查网络或版本号是否正确"
+  echo "🟡 下载失败，请检查网络或版本号是否正确"
   exit 1
 }
 
-echo "⌛️ 解压文件..."
+echo "🟡 解压文件..."
 tar -zxvf "${BIN_NAME}.tar.gz"
 mv "${BIN_NAME}" "miaospeed"
 chmod +x "miaospeed"
@@ -226,7 +226,7 @@ fi
 
 # ---------- systemd ----------
 if [ "$SERVICE_MODE" = "1" ]; then
-  echo "⚙️ 创建 systemd 服务..."
+  echo "🟡️ 创建 systemd 服务..."
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=MiaoSpeed Backend Service
@@ -250,7 +250,7 @@ EOF
 
 # ---------- OpenWrt procd ----------
 else
-  echo "⚙️ 创建 procd 启动脚本..."
+  echo "🟡️ 创建 procd 启动脚本..."
   cat > "/etc/init.d/${SERVICE_NAME}" <<EOF
 #!/bin/sh /etc/rc.common
 START=95
@@ -278,7 +278,7 @@ fi
 # ============================================================
 # 生成自动更新脚本
 # ============================================================
-echo "🔄 生成自动更新脚本..."
+echo "🟡 生成自动更新脚本..."
 UPDATE_SCRIPT="${INSTALL_DIR}/update.sh"
 
 cat > "$UPDATE_SCRIPT" <<EOF
@@ -295,7 +295,7 @@ case "\$ARCH" in
     BIN_NAME="miaospeed-linux-arm64"
     ;;
   *)
-    echo "❌ 架构 \$ARCH 不受支持"
+    echo "🟡 架构 \$ARCH 不受支持"
     exit 1
     ;;
 esac
@@ -321,9 +321,9 @@ if [ "\$CURRENT_VERSION" != "\$LATEST_VERSION" ]; then
     /etc/init.d/\$SERVICE_NAME restart
   fi
 
-  echo "✔️ MiaoSpeed 已更新至 \$LATEST_VERSION 并重启完成"
+  echo "🟡️ MiaoSpeed 已更新至 \$LATEST_VERSION 并重启完成"
 else
-  echo "💤 当前已是最新版本 \$CURRENT_VERSION，无需更新"
+  echo "🟡 当前已是最新版本 \$CURRENT_VERSION，无需更新"
 fi
 EOF
 chmod +x "$UPDATE_SCRIPT"
@@ -339,12 +339,12 @@ ENABLE_AUTO_UPDATE=${ENABLE_AUTO_UPDATE:-y}
 if [ "$ENABLE_AUTO_UPDATE" = "y" ] || [ "$ENABLE_AUTO_UPDATE" = "Y" ]; then
   CRON_JOB="0 4 * * * ${UPDATE_SCRIPT} >> ${INSTALL_DIR}/update.log 2>&1"
   (crontab -l 2>/dev/null | grep -v "$UPDATE_SCRIPT"; echo "$CRON_JOB") | crontab -
-  echo "✔️ 已启用无人值守自动更新任务"
-  echo "  每天凌晨 4 点会自动检测并更新 MiaoSpeed"
-  echo "  日志文件: ${INSTALL_DIR}/update.log"
+  echo "🟡️ 已启用无人值守自动更新任务"
+  echo "    每天凌晨 4 点会自动检测并更新 MiaoSpeed"
+  echo "    日志文件: ${INSTALL_DIR}/update.log"
 else
-  echo "ℹ️ 已跳过无人值守自动更新，如需手动启用，可运行 crontab -e 添加："
-  echo "  0 4 * * * ${UPDATE_SCRIPT} >> ${INSTALL_DIR}/update.log 2>&1"
+  echo "🟡 已跳过无人值守自动更新，如需手动启用，可运行 crontab -e 添加："
+  echo "    0 4 * * * ${UPDATE_SCRIPT} >> ${INSTALL_DIR}/update.log 2>&1"
 fi
 
 # ============================================================
@@ -352,10 +352,10 @@ fi
 # ============================================================
 echo ""
 echo "====== 检查服务状态 ======"
-if command -v netstat &>/dev/null; 键，然后
-  netstat -tunlp | grep "${PORT}" && echo "✔️ MiaoSpeed 端口 ${PORT} 正在监听"
+if command -v netstat &>/dev/null; then
+  netstat -tunlp | grep "${PORT}" && echo "🟡️ MiaoSpeed 端口 ${PORT} 正在监听"
 else
-  echo "⚠️ 无法检测端口状态，请手动确认 ${PORT} 是否监听中"
+  echo "🟡️ 无法检测端口状态，请手动确认 ${PORT} 是否监听中"
 fi
 
 # ============================================================
@@ -363,7 +363,7 @@ fi
 # ============================================================
 echo ""
 echo "====== 部署完成 ======"
-echo "🧑‍💻 服务管理命令:"
+echo "🟡 服务管理命令:"
 if [ "$SERVICE_MODE" = "1" ]; then
   echo "  systemctl restart ${SERVICE_NAME}   # 重启服务"
   echo "  systemctl stop ${SERVICE_NAME}      # 停止服务"
@@ -374,17 +374,17 @@ else
   echo "  /etc/init.d/${SERVICE_NAME} status  # 停止服务"
 fi
 echo ""
-echo "📄 日志管理:"
+echo "🟡 日志管理:"
 echo "  tail -f ${LOG_FILE}                 # 实时查看运行日志"
 echo "  echo '' > ${LOG_FILE}               # 清空运行日志"
 echo "  tail -f ${INSTALL_DIR}/update.log   # 实时查看更新日志"
 echo ""
-echo "🔑 参数设置:"
+echo "🟡 参数设置:"
 echo "监听端口 Port: ${PORT}"
 echo "后端连接 Path: ${PATH_WS}"
 echo "后端连接 Token: ${TOKEN}"
 echo ""
-echo "  🎉🎉🎉 MiaoSpeed 已部署完成 🎉🎉🎉"
+echo "  🟡🟡🟡 MiaoSpeed 已部署完成 🟡🟡🟡"
 echo ""
-echo "🗑 卸载请执行:"
+echo "🟡 卸载请执行:"
 echo "  bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/InstallMiaoSpeed/InstallMiaoSpeed.sh) --uninstall"
