@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 #================================================================
 # MiaoSpeed 一键安装 / 卸载 / 更新脚本
@@ -145,13 +144,12 @@ title "配置参数"
 read -rp "请输入监听地址 [默认: 0.0.0.0:6699]: " BIND
 BIND=${BIND:-0.0.0.0:6699}
 
-RAND_PATH="ms$(head -c 8 /dev/urandom | md5sum | cut -c1-8)"
-read -rp "请输入 WebSocket 路径 [默认: /$RAND_PATH]: " PATH
-PATH=${PATH:-/$RAND_PATH}
+# 固定默认值
+read -rp "请输入 WebSocket 路径 [默认: /miaospeed]: " PATH
+PATH=${PATH:-/miaospeed}
 
-RAND_TOKEN=$(head -c 16 /dev/urandom | md5sum | cut -c1-32)
-read -rp "请输入连接 Token [默认随机生成]: " TOKEN
-TOKEN=${TOKEN:-$RAND_TOKEN}
+read -rp "请输入连接 Token [默认: defaulttoken]: " TOKEN
+TOKEN=${TOKEN:-defaulttoken}
 
 cat > "$CONFIG_FILE" <<EOF
 BIND=$BIND
@@ -299,5 +297,4 @@ chmod +x "$UPDATE_SCRIPT"
 title "安装完成"
 info "服务已启动，当前配置："
 cat "$CONFIG_FILE"
-info "统一进程名: miaospeed"
-info "卸载命令: bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/InstallMiaoSpeed/InstallMiaoSpeed.sh) --uninstall"
+info "卸载命令: bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/InstallMiaoSpeed/InstallMiaoSpeedv1.sh) --uninstall"
