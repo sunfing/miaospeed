@@ -167,6 +167,7 @@ wget -O "${BIN_NAME}.tar.gz" "${DOWNLOAD_URL}" || { err "下载失败"; exit 1; 
 say "解压文件..."
 tar -zxvf "${BIN_NAME}.tar.gz"
 mv "${BIN_NAME}" "miaospeed"
+rm -f "${BIN_NAME}.tar.gz"
 chmod +x "miaospeed"
 ok "安装完成"
 
