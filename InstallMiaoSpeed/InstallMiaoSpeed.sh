@@ -283,7 +283,7 @@ say "配置自动更新"
 read -p "是否启用无人值守每日凌晨 4 点自动更新？(y/n 默认: y): " ENABLE_AUTO_UPDATE
 ENABLE_AUTO_UPDATE=${ENABLE_AUTO_UPDATE:-y}
 if [[ "$ENABLE_AUTO_UPDATE" =~ [yY] ]]; then
-  CRON_JOB="0 4 * * * ${UPDATE_SCRIPT} >> ${INSTALL_DIR}/update.log 2>&1"
+  CRON_JOB="0 4 * * * ${UPDATE_SCRIPT} >> ${INSTALL_DIR}/miaospeed-update.log 2>&1"
   (crontab -l 2>/dev/null | grep -v "$UPDATE_SCRIPT"; echo "$CRON_JOB") | crontab -
   ok "已启用无人值守自动更新"
 else
