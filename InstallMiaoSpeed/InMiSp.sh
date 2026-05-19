@@ -53,6 +53,24 @@ validate_uint() {
   [[ "${1:-}" =~ ^[0-9]+$ ]]
 }
 
+validate_gbps() {
+  [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+gbps_to_bytes() {
+  awk -v gbps="${1:-0}" 'BEGIN { printf "%.0f", gbps * 131072000 }'
+}
+
+bytes_to_gbps() {
+  awk -v bytes="${1:-0}" 'BEGIN {
+    if (bytes == 0) printf "0";
+    else {
+      gbps = bytes / 131072000;
+      if (gbps == int(gbps)) printf "%d", gbps; else printf "%.2f", gbps;
+    }
+  }'
+}
+
 validate_path() {
   [[ "${1:-}" =~ ^/[A-Za-z0-9._/-]+$ ]]
 }
@@ -62,7 +80,7 @@ validate_token() {
 }
 
 validate_botid() {
-  [[ -z "${1:-}" || "${1:-}" =~ ^[0-9]+$ ]]
+  [[ -z "${1:-}" || "${1:-}" =~ ^[0-9]+(,[0-9]+)*$ ]]
 }
 
 random_port() {
@@ -213,16 +231,18 @@ WHITELIST=""
 echo -e "\n${C_Y}=== 阶段二: 运行参数 ===${C_0}"
 read -p "是否需要手工配置进阶参数 (并发/队列/白名单等)？(y/N 默认: N): " EDIT_ADV
 if is_yes "$EDIT_ADV"; then
-  read -p "BotID 白名单 (仅数字，留空允许所有) []: " INPUT_WHITE; WHITELIST=${INPUT_WHITE:-""}
-  if ! validate_botid "$WHITELIST"; then err "BotID 白名单仅允许数字，或留空。"; exit 1; fi
-  read -p "最大并发连接数 [${DEFAULT_CONN}]: " INPUT_CONN; CONNTHREAD=${INPUT_CONN:-$DEFAULT_CONN}
+  read -p "最大并发连接数 [默认 ${DEFAULT_CONN}]: " INPUT_CONN; CONNTHREAD=${INPUT_CONN:-$DEFAULT_CONN}
   if ! validate_uint "$CONNTHREAD"; then err "最大并发连接数必须是非负整数。"; exit 1; fi
-  read -p "最大任务队列 [150]: " INPUT_TASK; TASKLIMIT=${INPUT_TASK:-150}
+  read -p "最大任务队列 [默认 150]: " INPUT_TASK; TASKLIMIT=${INPUT_TASK:-150}
   if ! validate_uint "$TASKLIMIT"; then err "最大任务队列必须是非负整数。"; exit 1; fi
-  read -p "测速限速 (字节/秒, 0即不限速) [0]: " INPUT_SPEED; SPEEDLIMIT=${INPUT_SPEED:-0}
-  if ! validate_uint "$SPEEDLIMIT"; then err "测速限速必须是非负整数。"; exit 1; fi
-  read -p "任务间隔秒数 [0]: " INPUT_PAUSE; PAUSESECOND=${INPUT_PAUSE:-0}
+  read -p "测速限速 (Gbps，0 不限速；例如 1 表示限速 1G) [默认 0]: " INPUT_SPEED
+  SPEED_GBPS=${INPUT_SPEED:-0}
+  if ! validate_gbps "$SPEED_GBPS"; then err "测速限速必须是数字，例如 0、1、1.5。"; exit 1; fi
+  SPEEDLIMIT=$(gbps_to_bytes "$SPEED_GBPS")
+  read -p "任务间隔秒数 [默认 0]: " INPUT_PAUSE; PAUSESECOND=${INPUT_PAUSE:-0}
   if ! validate_uint "$PAUSESECOND"; then err "任务间隔秒数必须是非负整数。"; exit 1; fi
+  read -p "BotID 白名单 (仅数字，BotID 之间用英文半角逗号隔开，留空允许所有) [默认 空]: " INPUT_WHITE; WHITELIST=${INPUT_WHITE:-""}
+  if ! validate_botid "$WHITELIST"; then err "BotID 白名单仅允许数字和英文半角逗号，或留空。"; exit 1; fi
 fi
 
 echo -e "\n${C_B}=== 阶段三: 自动维护选项 ===${C_0}"
@@ -538,16 +558,58 @@ set -uo pipefail
 CONF_FILE="/opt/miaospeed/miaospeed.conf"
 [ ! -f "$CONF_FILE" ] && echo "未找到配置！请先安装。" && exit 1
 
+C_G="\033[1;32m"; C_Y="\033[1;33m"; C_R="\033[1;31m"; C_B="\033[1;34m"; C_0="\033[0m"
 _GET() { grep "^$1=" "$CONF_FILE" | sed -e "s/^$1=//;s/^\"//;s/\"$//"; }
 validate_port() { [[ "${1:-}" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
 validate_uint() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
+validate_gbps() { [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
 validate_path() { [[ "${1:-}" =~ ^/[A-Za-z0-9._/-]+$ ]]; }
 validate_token() { [[ "${1:-}" =~ ^[A-Za-z0-9._/-]+$ ]]; }
-validate_botid() { [[ -z "${1:-}" || "${1:-}" =~ ^[0-9]+$ ]]; }
+validate_botid() { [[ -z "${1:-}" || "${1:-}" =~ ^[0-9]+(,[0-9]+)*$ ]]; }
 is_yes() { case "${1:-}" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac; }
+gbps_to_bytes() { awk -v gbps="${1:-0}" 'BEGIN { printf "%.0f", gbps * 131072000 }'; }
+bytes_to_gbps() {
+  awk -v bytes="${1:-0}" 'BEGIN {
+    if (bytes == 0) {
+      printf "0"
+    } else {
+      gbps = bytes / 131072000
+      if (gbps == int(gbps)) printf "%d", gbps; else printf "%.2f", gbps
+    }
+  }'
+}
 has_restart_cron() {
   crontab -l 2>/dev/null | grep -F -q "/bin/systemctl restart miaospeed" \
     || crontab -l 2>/dev/null | grep -F -q "/etc/init.d/miaospeed restart"
+}
+
+has_update_cron() {
+  crontab -l 2>/dev/null | grep -F -q "/opt/miaospeed/update.sh"
+}
+
+show_service_status() {
+  local state since
+  if [ "$SVC_MODE" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
+    state=$(systemctl is-active miaospeed 2>/dev/null || true)
+    since=$(systemctl show miaospeed -p ActiveEnterTimestamp --value 2>/dev/null || true)
+    case "$state" in
+      active) echo -e "运行状态: ${C_G}运行中${C_0}" ;;
+      inactive) echo -e "运行状态: ${C_Y}已停止${C_0}" ;;
+      failed) echo -e "运行状态: ${C_R}启动失败${C_0}" ;;
+      activating) echo -e "运行状态: ${C_B}启动中${C_0}" ;;
+      deactivating) echo -e "运行状态: ${C_Y}停止中${C_0}" ;;
+      *) echo -e "运行状态: ${C_Y}未安装或状态未知${C_0}" ;;
+    esac
+    [ -n "$since" ] && echo "状态时间: $since"
+  elif [ -x /etc/init.d/miaospeed ]; then
+    if pgrep -f "/opt/miaospeed/miaospeed" >/dev/null 2>&1; then
+      echo -e "运行状态: ${C_G}运行中${C_0}"
+    else
+      echo -e "运行状态: ${C_Y}已停止${C_0}"
+    fi
+  else
+    echo -e "运行状态: ${C_Y}未找到服务脚本${C_0}"
+  fi
 }
 
 load_config() {
@@ -556,6 +618,10 @@ load_config() {
   PAUSESECOND=$(_GET PAUSESECOND); USE_MMDB=$(_GET USE_MMDB)
   MMDB_TEXT="未启用"
   is_yes "$USE_MMDB" && MMDB_TEXT="已启用"
+  SPEED_GBPS=$(bytes_to_gbps "$SPEEDLIMIT")
+  SPEED_TEXT="${SPEEDLIMIT} B/s"
+  [ "$SPEEDLIMIT" = "0" ] && SPEED_TEXT="不限速"
+  [ "$SPEEDLIMIT" != "0" ] && SPEED_TEXT="${SPEED_GBPS} Gbps (${SPEEDLIMIT} B/s)"
   SVC_MODE=$( [ -f "/etc/systemd/system/miaospeed.service" ] && echo 1 || echo 2 )
 }
 
@@ -566,23 +632,27 @@ pause_menu() {
 
 show_menu() {
   local restart_status="未开启"
+  local update_status="未开启"
   has_restart_cron && restart_status="已开启，每日 04:30"
+  has_update_cron && update_status="已开启，每日 04:00"
   clear
   echo "=================================================="
   echo "                MiaoSpeed 管理控制台"
   echo "=================================================="
-  printf "  %-2s %-28s\n" "1." "查看状态与配置"
-  printf "  %-2s %-28s\n" "2." "修改运行参数"
-  printf "  %-2s %-28s\n" "3." "手动检查更新"
-  printf "  %-2s %-28s\n" "4." "重启服务"
-  printf "  %-2s %-28s\n" "5." "停止服务"
-  printf "  %-2s %-28s\n" "6." "查看实时日志"
-  printf "  %-2s %-28s\n" "7." "开启/关闭定时重启"
-  printf "  %-2s %-28s\n" "8." "清理备份文件"
-  printf "  %-2s %-28s\n" "9." "卸载节点服务"
+  printf "  %-2s %-28s\n" "1." "查看状态配置"
+  printf "  %-2s %-28s\n" "2." "查看实时日志"
+  printf "  %-2s %-28s\n" "3." "修改运行参数"
+  printf "  %-2s %-28s\n" "4." "手动检查更新"
+  printf "  %-2s %-28s\n" "5." "重启喵速服务"
+  printf "  %-2s %-28s\n" "6." "停止喵速服务"
+  printf "  %-2s %-28s\n" "7." "开关自动更新"
+  printf "  %-2s %-28s\n" "8." "开关定时重启"
+  printf "  %-2s %-28s\n" "9." "清理备份文件"
+  printf "  %-3s %-27s\n" "10." "卸载"
   printf "  %-2s %-28s\n" "0." "退出"
   echo "--------------------------------------------------"
-  echo " 定时重启：${restart_status}"
+  echo " 自动更新喵速：${update_status}"
+  echo " 定时重启喵速：${restart_status}"
   echo "=================================================="
 }
 
@@ -603,37 +673,73 @@ while true; do
       printf "  %-14s %s\n" "BotID 白名单:" "${WHITELIST:-允许所有}"
       printf "  %-14s %s\n" "最大并发数:" "$CONNTHREAD"
       printf "  %-14s %s\n" "任务队列上限:" "$TASKLIMIT"
-      printf "  %-14s %s\n" "测速限速:" "${SPEEDLIMIT} B/s"
+      printf "  %-14s %s\n" "测速限速:" "$SPEED_TEXT"
       printf "  %-14s %s\n" "任务间隔:" "${PAUSESECOND} 秒"
       printf "  %-14s %s\n" "GEOIP 数据库:" "$MMDB_TEXT"
       echo
       echo "---------------- 服务状态 ----------------"
-      [ "$SVC_MODE" -eq 1 ] && systemctl status miaospeed --no-pager | grep Active || /etc/init.d/miaospeed status
+      show_service_status
       pause_menu
       ;;
     2)
-      cp "$CONF_FILE" "/opt/miaospeed/backup/miaospeed.conf_$(date +%Y%m%d_%H%M%S)_bak"
+      echo "按 Ctrl+C 结束日志查看并返回菜单。"
+      tail -f /opt/miaospeed/log/miaospeed.log &
+      tail_pid=$!
+      trap 'kill "$tail_pid" 2>/dev/null; wait "$tail_pid" 2>/dev/null; trap - INT' INT
+      wait "$tail_pid" 2>/dev/null
+      trap - INT
+      pause_menu
+      ;;
+    3)
+      OLD_PORT="$PORT"
+      OLD_PATH_WS="$PATH_WS"
+      OLD_TOKEN="$TOKEN"
+      OLD_WHITELIST="$WHITELIST"
+      OLD_CONNTHREAD="$CONNTHREAD"
+      OLD_TASKLIMIT="$TASKLIMIT"
+      OLD_SPEEDLIMIT="$SPEEDLIMIT"
+      OLD_PAUSESECOND="$PAUSESECOND"
+      OLD_USE_MMDB="$USE_MMDB"
       echo -e "\n--- 基础配置 (直接回车保持不变) ---"
-      read -p "监听端口 [$PORT]: " N_PORT; PORT=${N_PORT:-$PORT}
+      read -p "监听端口 [当前 $PORT]: " N_PORT; PORT=${N_PORT:-$PORT}
       if ! validate_port "$PORT"; then echo "端口必须是 1-65535 之间的数字。"; pause_menu; continue; fi
-      read -p "WebSocket 路径 [$PATH_WS]: " N_PATH; PATH_WS=${N_PATH:-$PATH_WS}
+      read -p "WebSocket 路径 [当前 $PATH_WS]: " N_PATH; PATH_WS=${N_PATH:-$PATH_WS}
       [[ "$PATH_WS" != /* ]] && PATH_WS="/$PATH_WS"
       if ! validate_path "$PATH_WS"; then echo "WebSocket 路径包含非法字符。"; pause_menu; continue; fi
-      read -p "连接 Token [$TOKEN]: " N_TOK; TOKEN=${N_TOK:-$TOKEN}
+      read -p "连接 Token [当前 $TOKEN]: " N_TOK; TOKEN=${N_TOK:-$TOKEN}
       if ! validate_token "$TOKEN"; then echo "Token 包含非法字符。"; pause_menu; continue; fi
 
       echo -e "\n--- 运行参数 (直接回车保持不变) ---"
       echo "提示: 没有明确性能瓶颈时建议保持默认。"
-      read -p "最大并发数 [$CONNTHREAD]: " N_CONN; CONNTHREAD=${N_CONN:-$CONNTHREAD}
+      read -p "最大并发数 [当前 $CONNTHREAD]: " N_CONN; CONNTHREAD=${N_CONN:-$CONNTHREAD}
       if ! validate_uint "$CONNTHREAD"; then echo "最大并发数必须是非负整数。"; pause_menu; continue; fi
-      read -p "最大任务队列 [$TASKLIMIT]: " N_TASK; TASKLIMIT=${N_TASK:-$TASKLIMIT}
+      read -p "最大任务队列 [当前 $TASKLIMIT]: " N_TASK; TASKLIMIT=${N_TASK:-$TASKLIMIT}
       if ! validate_uint "$TASKLIMIT"; then echo "最大任务队列必须是非负整数。"; pause_menu; continue; fi
-      read -p "测速限速(B/s) [$SPEEDLIMIT]: " N_SPD; SPEEDLIMIT=${N_SPD:-$SPEEDLIMIT}
-      if ! validate_uint "$SPEEDLIMIT"; then echo "测速限速必须是非负整数。"; pause_menu; continue; fi
-      read -p "任务间隔秒数 [$PAUSESECOND]: " N_PAU; PAUSESECOND=${N_PAU:-$PAUSESECOND}
+      read -p "测速限速(Gbps，0 不限速；例如 1 表示限速 1G) [当前 $SPEED_GBPS]: " N_SPD
+      SPEED_GBPS=${N_SPD:-$SPEED_GBPS}
+      if ! validate_gbps "$SPEED_GBPS"; then echo "测速限速必须是数字，例如 0、1、1.5。"; pause_menu; continue; fi
+      SPEEDLIMIT=$(gbps_to_bytes "$SPEED_GBPS")
+      read -p "任务间隔秒数 [当前 $PAUSESECOND]: " N_PAU; PAUSESECOND=${N_PAU:-$PAUSESECOND}
       if ! validate_uint "$PAUSESECOND"; then echo "任务间隔秒数必须是非负整数。"; pause_menu; continue; fi
-      read -p "BotID 白名单(仅数字，留空允许所有) [$WHITELIST]: " N_WHI; WHITELIST=${N_WHI:-$WHITELIST}
-      if ! validate_botid "$WHITELIST"; then echo "BotID 白名单仅允许数字，或留空。"; pause_menu; continue; fi
+      read -p "BotID 白名单(仅数字和英文半角逗号，留空允许所有) [当前 ${WHITELIST:-空}]: " N_WHI
+      WHITELIST=${N_WHI:-$WHITELIST}
+      if ! validate_botid "$WHITELIST"; then echo "BotID 白名单仅允许数字和英文半角逗号，或留空。"; pause_menu; continue; fi
+
+      if [ "$PORT" = "$OLD_PORT" ] \
+        && [ "$PATH_WS" = "$OLD_PATH_WS" ] \
+        && [ "$TOKEN" = "$OLD_TOKEN" ] \
+        && [ "$WHITELIST" = "$OLD_WHITELIST" ] \
+        && [ "$CONNTHREAD" = "$OLD_CONNTHREAD" ] \
+        && [ "$TASKLIMIT" = "$OLD_TASKLIMIT" ] \
+        && [ "$SPEEDLIMIT" = "$OLD_SPEEDLIMIT" ] \
+        && [ "$PAUSESECOND" = "$OLD_PAUSESECOND" ] \
+        && [ "$USE_MMDB" = "$OLD_USE_MMDB" ]; then
+        echo "参数未发生变化，已跳过备份和服务重启。"
+        pause_menu
+        continue
+      fi
+
+      cp "$CONF_FILE" "/opt/miaospeed/backup/miaospeed.conf_$(date +%Y%m%d_%H%M%S)_bak"
 
       cat > "$CONF_FILE" <<CONF
 PORT="${PORT}"
@@ -648,34 +754,47 @@ USE_MMDB="${USE_MMDB}"
 CONF
       chmod 600 "$CONF_FILE"
 
-      echo "配置已保存并备份，正在重启服务..."
+      echo "配置已保存。当前生效值："
+      printf "  %-14s %s\n" "最大并发数:" "$CONNTHREAD"
+      printf "  %-14s %s\n" "任务队列上限:" "$TASKLIMIT"
+      if [ "$SPEEDLIMIT" = "0" ]; then
+        printf "  %-14s %s\n" "测速限速:" "不限速"
+      else
+        printf "  %-14s %s\n" "测速限速:" "${SPEED_GBPS} Gbps (${SPEEDLIMIT} B/s)"
+      fi
+      printf "  %-14s %s\n" "BotID 白名单:" "${WHITELIST:-允许所有}"
+      echo "正在重启服务..."
       [ "$SVC_MODE" -eq 1 ] && systemctl restart miaospeed || /etc/init.d/miaospeed restart
       pause_menu
       ;;
-    3)
+    4)
       bash /opt/miaospeed/update.sh
       pause_menu
       ;;
-    4)
+    5)
       [ "$SVC_MODE" -eq 1 ] && systemctl restart miaospeed || /etc/init.d/miaospeed restart
       echo "服务已重启。"
       pause_menu
       ;;
-    5)
+    6)
       [ "$SVC_MODE" -eq 1 ] && systemctl stop miaospeed || /etc/init.d/miaospeed stop
       echo "服务已停止。"
       pause_menu
       ;;
-    6)
-      echo "按 Ctrl+C 结束日志查看并返回菜单。"
-      tail -f /opt/miaospeed/log/miaospeed.log &
-      tail_pid=$!
-      trap 'kill "$tail_pid" 2>/dev/null; wait "$tail_pid" 2>/dev/null; trap - INT' INT
-      wait "$tail_pid" 2>/dev/null
-      trap - INT
+    7)
+      if has_update_cron; then
+        crontab -l 2>/dev/null \
+          | grep -v -F "/opt/miaospeed/update.sh" \
+          | crontab -
+        echo "自动更新喵速已关闭。"
+      else
+        UPDATE_CMD="0 4 * * * /opt/miaospeed/update.sh >> /opt/miaospeed/log/update.log 2>&1"
+        (crontab -l 2>/dev/null | grep -v -F "/opt/miaospeed/update.sh"; echo "$UPDATE_CMD") | crontab -
+        echo "已开启自动更新喵速：每日 04:00 检查更新。"
+      fi
       pause_menu
       ;;
-    7)
+    8)
       if has_restart_cron; then
         crontab -l 2>/dev/null \
           | grep -v -F "/bin/systemctl restart miaospeed" \
@@ -689,7 +808,7 @@ CONF
       fi
       pause_menu
       ;;
-    8)
+    9)
       backup_count=$(find /opt/miaospeed/backup -type f 2>/dev/null | wc -l)
       echo "当前备份文件数量: ${backup_count}"
       read -p "确认清理所有备份文件吗? (y/N): " confirm
@@ -701,7 +820,7 @@ CONF
       fi
       pause_menu
       ;;
-    9)
+    10)
       read -p "确认卸载 MiaoSpeed 并删除相关文件吗? (y/N): " confirm
       if is_yes "$confirm"; then
         bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/InstallMiaoSpeed/InMiSp.sh) --uninstall 2>/dev/null || echo "请加 --uninstall 手动运行。"
@@ -735,15 +854,20 @@ echo -e " ${C_B}[运行参数]${C_0}"
 echo -e " - Bot 白名单      : ${WHITELIST:-[允许所有请求]}"
 echo -e " - 并发下发线程数  : ${CONNTHREAD}"
 echo -e " - 任务队列上限    : ${TASKLIMIT}"
-echo -e " - 单线程限流 (B/s): ${SPEEDLIMIT:-0 (无限制)}"
+if [ "$SPEEDLIMIT" = "0" ]; then
+  echo -e " - 测速限速        : 不限速"
+else
+  SPEED_GBPS_DISPLAY=$(bytes_to_gbps "$SPEEDLIMIT")
+  echo -e " - 测速限速        : ${SPEED_GBPS_DISPLAY} Gbps (${SPEEDLIMIT} B/s)"
+fi
 echo -e " - 任务缓冲 (秒)   : ${PAUSESECOND}"
 echo -e " - GEOIP 数据库    : ${MMDB_STATUS}"
 echo ""
 echo -e " ${C_B}[管理与维护]${C_0}"
 echo -e " - 交互控制台入口  : ${C_G}miao${C_0} (随时键入 miao 唤出主菜单)"
 echo -e " - 运行日志流向    : ${LOG_DIR}/miaospeed.log"
-echo -e " - 定时重启任务    : ${CRON_RESTART}"
 echo -e " - 自动更新任务    : ${CRON_UPDATE}"
+echo -e " - 定时重启任务    : ${CRON_RESTART}"
 echo -e "${C_G}============================================================${C_0}"
 echo -e " ${C_R}[!] 请确认云安全组或本机防火墙已放行 TCP 端口 ${PORT}${C_0}"
 echo -e "${C_G}============================================================${C_0}"
