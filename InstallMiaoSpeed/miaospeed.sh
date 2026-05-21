@@ -13,7 +13,7 @@ SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
 LOCAL_SCRIPT_BAK="/root/${SCRIPT_NAME}.bak"
 LAUNCHER="/usr/bin/miao"
-SCRIPT_REMOTE_URL="${SCRIPT_REMOTE_URL:-https://raw.githubusercontent.com/sunfing/miaospeed/main/miaospeed.sh}"
+SCRIPT_REMOTE_URL="${SCRIPT_REMOTE_URL:-https://raw.githubusercontent.com/sunfing/miaospeed/main/InstallMiaoSpeed/miaospeed.sh}"
 
 INSTALL_DIR="/opt/miaospeed"
 LOG_DIR="${INSTALL_DIR}/log"
