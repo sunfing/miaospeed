@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260522.1"
+SCRIPT_VERSION="20260522.2"
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
 LOCAL_SCRIPT_BAK="/root/${SCRIPT_NAME}.bak"
@@ -34,6 +34,7 @@ DEFAULT_CONN=64
 OS_TYPE="linux"
 SERVICE_MODE=1 # 1=systemd, 2=procd
 LAST_BACKUP_FILE=""
+INSTALL_INTERRUPTED=0
 
 C_G="\033[1;32m"; C_Y="\033[1;33m"; C_R="\033[1;31m"; C_B="\033[1;34m"; C_0="\033[0m"
 say()  { echo -e "${C_B}[*]${C_0} $*"; }
@@ -44,6 +45,45 @@ err()  { echo -e "${C_R}[X]${C_0} $*"; }
 pause_menu() {
   echo
   read -r -p "按回车返回..." _
+}
+
+install_interrupt_handler() {
+  local confirm
+  INSTALL_INTERRUPTED=1
+  trap - INT TERM
+  echo
+  warn "安装流程已中断。"
+  echo "当前可能已创建本地脚本、快捷入口或临时目录。"
+  read -r -p "是否清理本次安装产生的文件? (y/N): " confirm
+  if is_yes "$confirm"; then
+    cleanup_interrupted_install
+    ok "已清理本次安装产生的文件。"
+  else
+    warn "已保留现有文件；可稍后运行 bash ${LOCAL_SCRIPT} --uninstall 清理。"
+  fi
+  exit 130
+}
+
+cleanup_interrupted_install() {
+  systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+  systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  if [ -f "/etc/init.d/${SERVICE_NAME}" ]; then
+    /etc/init.d/"$SERVICE_NAME" stop >/dev/null 2>&1 || true
+    /etc/init.d/"$SERVICE_NAME" disable >/dev/null 2>&1 || true
+    rm -f "/etc/init.d/${SERVICE_NAME}"
+  fi
+
+  disable_core_auto_update >/dev/null 2>&1 || true
+  disable_script_auto_update >/dev/null 2>&1 || true
+  disable_restart_cron >/dev/null 2>&1 || true
+
+  pkill -9 -f "^${INSTALL_DIR}/miaospeed" >/dev/null 2>&1 || true
+  rm -rf "$INSTALL_DIR"
+  rm -f "$LAUNCHER" /usr/local/bin/miao /etc/logrotate.d/miaospeed
+  rm -f "$LOCAL_SCRIPT" "$LOCAL_SCRIPT_BAK"
 }
 
 require_root() {
@@ -1441,6 +1481,7 @@ prompt_initial_config() {
 install_flow() {
   local latest_version work_dir binary_path
   require_root
+  trap install_interrupt_handler INT TERM
   ensure_dirs
   detect_environment
   install_local_script
@@ -1461,6 +1502,7 @@ install_flow() {
   work_dir="${TMP_DIR}/install-work"
   binary_path=$(download_core_to_workdir "$latest_version" "$work_dir") || {
     err "核心程序下载或校验失败。"
+    trap - INT TERM
     exit 1
   }
 
@@ -1480,6 +1522,7 @@ install_flow() {
   stop_service >/dev/null 2>&1 || true
   if ! cp "$binary_path" "${INSTALL_DIR}/miaospeed"; then
     err "写入核心程序失败，请检查 ${INSTALL_DIR} 权限或磁盘空间。"
+    trap - INT TERM
     exit 1
   fi
   chmod +x "${INSTALL_DIR}/miaospeed"
@@ -1492,10 +1535,12 @@ install_flow() {
       ok "喵速服务已启动。"
     else
       err "服务启动命令已执行，但健康检查未通过，请查看日志。"
+      trap - INT TERM
       exit 1
     fi
   else
     err "服务启动失败，请查看日志。"
+    trap - INT TERM
     exit 1
   fi
 
@@ -1510,6 +1555,7 @@ install_flow() {
   fi
 
   show_install_summary
+  trap - INT TERM
 }
 
 show_install_summary() {
