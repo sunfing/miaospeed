@@ -1,14 +1,14 @@
 #!/bin/bash
 # ============================================================
-# MiaoSpeed 测试后端安装与管理脚本
+# 喵速测试后端安装与管理脚本
 # 支持系统: Linux AMD64 / ARM64 (含 OpenWrt)
-# 特性: 本地留存 / 核心更新 / 脚本自更新 / 交互式管理
+# 特性: 本地留存 / 喵速更新 / 脚本自更新 / 交互式管理
 # Telegram: https://t.me/i_chl
 # ============================================================
 
 set -uo pipefail
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="20260522.1"
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
 LOCAL_SCRIPT_BAK="/root/${SCRIPT_NAME}.bak"
@@ -251,7 +251,7 @@ download_core_to_workdir() {
   file="${BIN_NAME}-${version}.tar.gz"
   url="https://github.com/${CORE_REPO}/releases/download/${version}/${file}"
 
-  say "下载 MiaoSpeed 核心: ${version}" >&2
+  say "下载喵速核心: ${version}" >&2
   fetch_file "$url" "${work_dir}/${file}" || return 1
 
   if fetch_file "${url}.sha256" "${work_dir}/${file}.sha256" >/dev/null 2>&1; then
@@ -269,7 +269,7 @@ download_core_to_workdir() {
   tar -zxf "${work_dir}/${file}" -C "$work_dir" || return 1
   binary_path=$(find_extracted_binary "$work_dir")
   if [ -z "$binary_path" ] || [ ! -f "$binary_path" ]; then
-    err "安装包中未找到 MiaoSpeed 可执行文件。" >&2
+    err "安装包中未找到喵速可执行文件。" >&2
     return 1
   fi
   chmod +x "$binary_path"
@@ -322,7 +322,7 @@ validate_script_file() {
 }
 
 install_local_script() {
-  local source_path source_real local_real tmp copied=1
+  local quiet="${1:-0}" source_path source_real local_real tmp copied=1
   mkdir -p /root
 
   source_path="${BASH_SOURCE[0]:-}"
@@ -342,23 +342,23 @@ install_local_script() {
   fi
 
   if [ "$copied" -ne 0 ]; then
-    warn "无法从当前运行入口复制脚本，尝试从远端保存本地脚本。"
+    [ "$quiet" = "1" ] || warn "无法从当前运行入口复制脚本，尝试从远端保存本地脚本。"
     tmp=$(mktemp /root/miaospeed.sh.XXXXXX)
     if fetch_file "$SCRIPT_REMOTE_URL" "$tmp" && validate_script_file "$tmp"; then
       mv -f "$tmp" "$LOCAL_SCRIPT"
       copied=0
     else
       rm -f "$tmp"
-      warn "本地脚本保存失败；后续可手动保存到 ${LOCAL_SCRIPT}。"
+      [ "$quiet" = "1" ] || warn "本地脚本保存失败；后续可手动保存到 ${LOCAL_SCRIPT}。"
     fi
   fi
 
   if [ "$copied" -eq 0 ]; then
     chmod 700 "$LOCAL_SCRIPT"
-    ok "本地管理脚本: ${LOCAL_SCRIPT}"
+    [ "$quiet" = "1" ] || ok "本地管理脚本: ${LOCAL_SCRIPT}"
   fi
   create_launcher
-  ok "快捷入口: ${LAUNCHER}，可直接输入 miao。"
+  [ "$quiet" = "1" ] || ok "快捷入口: ${LAUNCHER}，可直接输入 miao。"
 }
 
 get_conf() {
@@ -411,8 +411,41 @@ EOF
 
 backup_config() {
   mkdir -p "$BACKUP_DIR"
-  LAST_BACKUP_FILE="${BACKUP_DIR}/miaospeed.conf_$(date +%Y%m%d_%H%M%S)_bak"
+  LAST_BACKUP_FILE="${BACKUP_DIR}/miaospeed.conf_$(date +%Y%m%d_%H%M%S)_$$_bak"
   cp "$CONF_FILE" "$LAST_BACKUP_FILE"
+}
+
+latest_config_backup() {
+  ls -t "${BACKUP_DIR}"/miaospeed.conf_*_bak 2>/dev/null | head -n 1
+}
+
+restore_latest_config_backup() {
+  local latest="$1"
+  if [ -z "$latest" ] || [ ! -f "$latest" ]; then
+    err "未找到可恢复的配置备份。"
+    return 1
+  fi
+
+  if [ -f "$CONF_FILE" ]; then
+    backup_config || {
+      err "恢复前备份当前配置失败，已取消恢复。"
+      return 1
+    }
+  fi
+
+  cp "$latest" "$CONF_FILE" || {
+    err "恢复配置失败。"
+    return 1
+  }
+  chmod 600 "$CONF_FILE"
+
+  say "配置已恢复，正在重启服务..."
+  if restart_service; then
+    ok "配置已恢复并重启服务。"
+  else
+    err "配置已恢复，但服务重启失败，请查看日志。"
+    return 1
+  fi
 }
 
 current_service_mode() {
@@ -641,7 +674,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 [ -f "$CONF" ] || { log "[Error] 未找到配置文件。"; exit 1; }
-[ -x "$BIN" ] || { log "[Error] 未找到 MiaoSpeed 主程序。"; exit 1; }
+[ -x "$BIN" ] || { log "[Error] 未找到喵速主程序。"; exit 1; }
 
 SVC_MODE=$( [ -f "/etc/systemd/system/miaospeed.service" ] && command -v systemctl >/dev/null 2>&1 && echo 1 || echo 2 )
 stop_service() {
@@ -826,6 +859,42 @@ restart_cron_status() {
   fi
 }
 
+print_kv() {
+  local label="$1" value="$2"
+  case "$label" in
+    "GEOIP 数据库")   echo "  GEOIP 数据库       : ${value}" ;;
+    "喵速自动更新")   echo "  喵速自动更新       : ${value}" ;;
+    "脚本自动更新")   echo "  脚本自动更新       : ${value}" ;;
+    "喵速定时重启")   echo "  喵速定时重启       : ${value}" ;;
+    "运行状态")       echo -e "  运行状态           : ${value}" ;;
+    "状态时间")       echo "  状态时间           : ${value}" ;;
+    "脚本版本")       echo "  脚本版本           : ${value}" ;;
+    "本地脚本")       echo "  本地脚本           : ${value}" ;;
+    "快捷入口")       echo "  快捷入口           : ${value}" ;;
+    "运行日志")       echo "  运行日志           : ${value}" ;;
+    "监听端口")       echo "  监听端口           : ${value}" ;;
+    "WebSocket 路径") echo "  WebSocket 路径     : ${value}" ;;
+    "连接 Token")     echo "  连接 Token         : ${value}" ;;
+    "BotID 白名单")   echo "  BotID 白名单       : ${value}" ;;
+    "最大并发数")     echo "  最大并发数         : ${value}" ;;
+    "任务队列上限")   echo "  任务队列上限       : ${value}" ;;
+    "测速限速")       echo "  测速限速           : ${value}" ;;
+    "任务间隔")       echo "  任务间隔           : ${value}" ;;
+    *)                echo "  ${label}: ${value}" ;;
+  esac
+}
+
+print_menu_item() {
+  local number="$1" label="$2" value="$3"
+  case "$label" in
+    "GEOIP 数据库")   echo "  ${number}  GEOIP 数据库       ${value}" ;;
+    "喵速自动更新")   echo "  ${number}  喵速自动更新       ${value}" ;;
+    "脚本自动更新")   echo "  ${number}  脚本自动更新       ${value}" ;;
+    "喵速定时重启")   echo "  ${number}  喵速定时重启       ${value}" ;;
+    *)                echo "  ${number}  ${label} ${value}" ;;
+  esac
+}
+
 service_status_text() {
   local mode state since
   mode=$(current_service_mode)
@@ -833,22 +902,22 @@ service_status_text() {
     state=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)
     since=$(systemctl show "$SERVICE_NAME" -p ActiveEnterTimestamp --value 2>/dev/null || true)
     case "$state" in
-      active) echo -e "运行状态        : ${C_G}运行中${C_0}" ;;
-      inactive) echo -e "运行状态        : ${C_Y}已停止${C_0}" ;;
-      failed) echo -e "运行状态        : ${C_R}启动失败${C_0}" ;;
-      activating) echo -e "运行状态        : ${C_B}启动中${C_0}" ;;
-      *) echo -e "运行状态        : ${C_Y}未知${C_0}" ;;
+      active) print_kv "运行状态" "${C_G}运行中${C_0}" ;;
+      inactive) print_kv "运行状态" "${C_Y}已停止${C_0}" ;;
+      failed) print_kv "运行状态" "${C_R}启动失败${C_0}" ;;
+      activating) print_kv "运行状态" "${C_B}启动中${C_0}" ;;
+      *) print_kv "运行状态" "${C_Y}未知${C_0}" ;;
     esac
-    [ -n "$since" ] && echo "状态时间        : $since"
+    [ -n "$since" ] && print_kv "状态时间" "$since"
   elif [ -x "/etc/init.d/${SERVICE_NAME}" ]; then
     if { command_exists pgrep && pgrep -f "${INSTALL_DIR}/miaospeed" >/dev/null 2>&1; } \
       || { command_exists pidof && pidof miaospeed >/dev/null 2>&1; }; then
-      echo -e "运行状态        : ${C_G}运行中${C_0}"
+      print_kv "运行状态" "${C_G}运行中${C_0}"
     else
-      echo -e "运行状态        : ${C_Y}已停止${C_0}"
+      print_kv "运行状态" "${C_Y}已停止${C_0}"
     fi
   else
-    echo -e "运行状态        : ${C_Y}未找到服务${C_0}"
+    print_kv "运行状态" "${C_Y}未找到服务${C_0}"
   fi
 }
 
@@ -861,36 +930,36 @@ show_status_config() {
   whitelist_text="${WHITELIST:-允许所有}"
 
   echo
-  echo "---------------- 核心连接参数 ----------------"
-  printf "  %-16s %s\n" "监听端口:" "$PORT"
-  printf "  %-16s %s\n" "WebSocket 路径:" "$PATH_WS"
-  printf "  %-16s %s\n" "连接 Token:" "$TOKEN"
+  echo "---------------- 连接参数 ----------------"
+  print_kv "监听端口" "$PORT"
+  print_kv "WebSocket 路径" "$PATH_WS"
+  print_kv "连接 Token" "$TOKEN"
 
   echo
   echo "---------------- 访问控制 ----------------"
-  printf "  %-16s %s\n" "BotID 白名单:" "$whitelist_text"
+  print_kv "BotID 白名单" "$whitelist_text"
 
   echo
   echo "---------------- 运行参数 ----------------"
-  printf "  %-16s %s\n" "最大并发数:" "$CONNTHREAD"
-  printf "  %-16s %s\n" "任务队列上限:" "$TASKLIMIT"
-  printf "  %-16s %s\n" "测速限速:" "$speed_text"
-  printf "  %-16s %s\n" "任务间隔:" "${PAUSESECOND} 秒"
+  print_kv "最大并发数" "$CONNTHREAD"
+  print_kv "任务队列上限" "$TASKLIMIT"
+  print_kv "测速限速" "$speed_text"
+  print_kv "任务间隔" "${PAUSESECOND} 秒"
 
   echo
   echo "---------------- 自动维护 ----------------"
-  printf "  %-16s %s\n" "GEOIP 数据库:" "$mmdb_text"
-  printf "  %-16s %s\n" "核心自动更新:" "$(core_auto_update_status)"
-  printf "  %-16s %s\n" "脚本自动更新:" "$(script_auto_update_status)"
-  printf "  %-16s %s\n" "定时重启:" "$(restart_cron_status)"
+  print_kv "GEOIP 数据库" "$mmdb_text"
+  print_kv "喵速自动更新" "$(core_auto_update_status)"
+  print_kv "脚本自动更新" "$(script_auto_update_status)"
+  print_kv "喵速定时重启" "$(restart_cron_status)"
 
   echo
   echo "---------------- 服务与文件 ----------------"
   service_status_text
-  printf "  %-16s %s\n" "脚本版本:" "$SCRIPT_VERSION"
-  printf "  %-16s %s\n" "本地脚本:" "$LOCAL_SCRIPT"
-  printf "  %-16s %s\n" "快捷入口:" "$LAUNCHER"
-  printf "  %-16s %s\n" "运行日志:" "${LOG_DIR}/miaospeed.log"
+  print_kv "脚本版本" "$SCRIPT_VERSION"
+  print_kv "本地脚本" "$LOCAL_SCRIPT"
+  print_kv "快捷入口" "$LAUNCHER"
+  print_kv "运行日志" "${LOG_DIR}/miaospeed.log"
 }
 
 view_logs() {
@@ -1123,11 +1192,11 @@ auto_maintenance_menu() {
     echo "=================================================="
     echo "                自动维护设置"
     echo "=================================================="
-    printf "  %-3s %-24s %s\n" "1." "核心自动更新" "$(core_auto_update_status)"
-    printf "  %-3s %-24s %s\n" "2." "管理脚本自动更新" "$(script_auto_update_status)"
-    printf "  %-3s %-24s %s\n" "3." "定时重启服务" "$(restart_cron_status)"
     load_config
-    printf "  %-3s %-24s %s\n" "4." "GEOIP 数据库" "$(is_yes "$USE_MMDB" && echo 已启用 || echo 未启用)"
+    print_menu_item "1." "GEOIP 数据库" "$(is_yes "$USE_MMDB" && echo 已启用 || echo 未启用)"
+    print_menu_item "2." "喵速自动更新" "$(core_auto_update_status)"
+    print_menu_item "3." "脚本自动更新" "$(script_auto_update_status)"
+    print_menu_item "4." "喵速定时重启" "$(restart_cron_status)"
     echo "--------------------------------------------------"
     echo "  0.  返回主菜单"
     echo "=================================================="
@@ -1135,31 +1204,31 @@ auto_maintenance_menu() {
 
     case "$choice" in
       1)
-        if has_cron_line "$UPDATE_SCRIPT"; then
-          disable_core_auto_update && ok "核心自动更新已关闭。"
-        else
-          enable_core_auto_update && ok "核心自动更新已开启，每日 04:00。"
-        fi
+        toggle_geoip
         pause_menu
         ;;
       2)
-        if has_cron_line "${LOCAL_SCRIPT} --self-update"; then
-          disable_script_auto_update && ok "管理脚本自动更新已关闭。"
+        if has_cron_line "$UPDATE_SCRIPT"; then
+          disable_core_auto_update && ok "喵速自动更新已关闭。"
         else
-          enable_script_auto_update && ok "管理脚本自动更新已开启，每日 03:30。"
+          enable_core_auto_update && ok "喵速自动更新已开启，每日 04:00。"
         fi
         pause_menu
         ;;
       3)
-        if has_cron_line "/bin/systemctl restart ${SERVICE_NAME}" || has_cron_line "/etc/init.d/${SERVICE_NAME} restart"; then
-          disable_restart_cron && ok "定时重启已关闭。"
+        if has_cron_line "${LOCAL_SCRIPT} --self-update"; then
+          disable_script_auto_update && ok "脚本自动更新已关闭。"
         else
-          enable_restart_cron && ok "定时重启已开启，每日 04:30。"
+          enable_script_auto_update && ok "脚本自动更新已开启，每日 03:30。"
         fi
         pause_menu
         ;;
       4)
-        toggle_geoip
+        if has_cron_line "/bin/systemctl restart ${SERVICE_NAME}" || has_cron_line "/etc/init.d/${SERVICE_NAME} restart"; then
+          disable_restart_cron && ok "喵速定时重启已关闭。"
+        else
+          enable_restart_cron && ok "喵速定时重启已开启，每日 04:30。"
+        fi
         pause_menu
         ;;
       0) return ;;
@@ -1172,18 +1241,19 @@ backup_cleanup_menu() {
   local choice confirm count latest
   while true; do
     clear
-    count=$(find "$BACKUP_DIR" -type f 2>/dev/null | wc -l | awk '{print $1}')
-    latest=$(ls -t "$BACKUP_DIR"/* 2>/dev/null | head -n 1)
+    count=$(find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" 2>/dev/null | wc -l | awk '{print $1}')
+    latest=$(latest_config_backup)
 
     echo "=================================================="
-    echo "                备份与清理"
+    echo "              配置备份与清理"
     echo "=================================================="
-    echo "备份数量: ${count}"
-    [ -n "${latest:-}" ] && echo "最新备份: ${latest}"
+    echo "配置备份数量: ${count}"
+    [ -n "${latest:-}" ] && echo "最近配置备份: ${latest}"
     echo "--------------------------------------------------"
     echo "  1.  立即备份配置"
-    echo "  2.  清理 30 天前备份"
-    echo "  3.  清理所有备份"
+    echo "  2.  恢复最近配置备份"
+    echo "  3.  清理 30 天前配置备份"
+    echo "  4.  清理所有配置备份"
     echo "  0.  返回主菜单"
     echo "=================================================="
     read -r -p "请输入序号: " choice
@@ -1198,15 +1268,30 @@ backup_cleanup_menu() {
         pause_menu
         ;;
       2)
-        find "$BACKUP_DIR" -type f -name "*_bak" -mtime +30 -exec rm -f {} \; 2>/dev/null
-        ok "已清理 30 天前备份。"
+        if [ -z "${latest:-}" ]; then
+          err "未找到可恢复的配置备份。"
+        else
+          echo "将恢复最近配置备份:"
+          echo "$latest"
+          read -r -p "确认恢复并重启服务吗? (y/N): " confirm
+          if is_yes "$confirm"; then
+            restore_latest_config_backup "$latest"
+          else
+            echo "已取消。"
+          fi
+        fi
         pause_menu
         ;;
       3)
-        read -r -p "确认清理所有备份文件吗? (y/N): " confirm
+        find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" -mtime +30 -exec rm -f {} \; 2>/dev/null
+        ok "已清理 30 天前配置备份。"
+        pause_menu
+        ;;
+      4)
+        read -r -p "确认清理所有配置备份文件吗? (y/N): " confirm
         if is_yes "$confirm"; then
-          find "$BACKUP_DIR" -type f -exec rm -f {} \; 2>/dev/null
-          ok "所有备份文件已清理。"
+          find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" -exec rm -f {} \; 2>/dev/null
+          ok "所有配置备份文件已清理。"
         else
           echo "已取消。"
         fi
@@ -1221,23 +1306,23 @@ backup_cleanup_menu() {
 show_menu() {
   clear
   echo "=================================================="
-  echo "              MiaoSpeed 管理控制台"
+  echo "              喵速管理控制台"
   echo "=================================================="
   printf "  %-3s %s\n" "1." "查看状态配置"
   printf "  %-3s %s\n" "2." "查看实时日志"
   printf "  %-3s %s\n" "3." "修改连接参数"
   printf "  %-3s %s\n" "4." "修改访问控制"
   printf "  %-3s %s\n" "5." "修改运行参数"
-  printf "  %-3s %s\n" "6." "检查核心更新"
+  printf "  %-3s %s\n" "6." "检查喵速更新"
   printf "  %-3s %s\n" "7." "更新管理脚本"
   printf "  %-3s %s\n" "8." "自动维护设置"
-  printf "  %-3s %s\n" "9." "备份与清理"
+  printf "  %-3s %s\n" "9." "配置备份与清理"
   printf "  %-3s %s\n" "10." "卸载"
   printf "  %-3s %s\n" "0." "退出"
   echo "--------------------------------------------------"
-  printf "  %-14s %s\n" "核心自动更新:" "$(core_auto_update_status)"
-  printf "  %-14s %s\n" "脚本自动更新:" "$(script_auto_update_status)"
-  printf "  %-14s %s\n" "定时重启:" "$(restart_cron_status)"
+  echo "  喵速自动更新 : $(core_auto_update_status)"
+  echo "  脚本自动更新 : $(script_auto_update_status)"
+  echo "  喵速定时重启 : $(restart_cron_status)"
   echo "=================================================="
 }
 
@@ -1259,7 +1344,7 @@ main_menu() {
       8) auto_maintenance_menu ;;
       9) backup_cleanup_menu ;;
       10)
-        read -r -p "确认卸载 MiaoSpeed 并删除相关文件吗? (y/N): " confirm
+        read -r -p "确认卸载喵速并删除相关文件吗? (y/N): " confirm
         if is_yes "$confirm"; then
           uninstall_flow "full"
           exit 0
@@ -1275,7 +1360,7 @@ main_menu() {
 prompt_initial_config() {
   local input speed_gbps
 
-  echo -e "\n${C_G}=== 阶段一: 核心连接参数 ===${C_0}"
+  echo -e "\n${C_G}=== 阶段一: 连接参数 ===${C_0}"
   read -r -p "监听端口 (直接回车随机分配 10000-59999): " input
   if [ -z "$input" ]; then
     PORT=$(random_port)
@@ -1343,13 +1428,13 @@ prompt_initial_config() {
   read -r -p "是否下载并启用 GEOIP 数据库? (y/N 默认: N): " input
   USE_MMDB="${input:-n}"
 
-  read -r -p "是否启用每日 04:00 核心自动更新? (y/N 默认: N): " input
+  read -r -p "是否启用每日 04:00 喵速自动更新? (y/N 默认: N): " input
   ENABLE_CORE_AUTO_UPDATE="${input:-n}"
 
   read -r -p "是否启用每日 03:30 管理脚本自动更新? (y/N 默认: N): " input
   ENABLE_SCRIPT_AUTO_UPDATE="${input:-n}"
 
-  read -r -p "是否启用每日 04:30 定时重启服务? (Y/n 默认: Y): " input
+  read -r -p "是否启用每日 04:30 喵速定时重启? (Y/n 默认: Y): " input
   ENABLE_RESTART="${input:-y}"
 }
 
@@ -1360,9 +1445,9 @@ install_flow() {
   detect_environment
   install_local_script
   install_dependencies
-  install_local_script
+  install_local_script 1
 
-  say "获取 MiaoSpeed 最新版本..."
+  say "获取喵速最新版本..."
   latest_version=$(get_latest_core_version || true)
   if [ -z "$latest_version" ]; then
     warn "获取最新版本失败，回退至默认版本 4.6.1。"
@@ -1400,11 +1485,11 @@ install_flow() {
   chmod +x "${INSTALL_DIR}/miaospeed"
   rm -rf "$work_dir"
 
-  say "启动 MiaoSpeed 服务..."
+  say "启动喵速服务..."
   if start_service; then
     sleep 3
     if is_service_alive; then
-      ok "MiaoSpeed 服务已启动。"
+      ok "喵速服务已启动。"
     else
       err "服务启动命令已执行，但健康检查未通过，请查看日志。"
       exit 1
@@ -1435,10 +1520,10 @@ show_install_summary() {
   whitelist_text="${WHITELIST:-允许所有}"
 
   echo -e "\n${C_G}============================================================${C_0}"
-  echo -e " MiaoSpeed 部署完成"
+  echo -e " 喵速部署完成"
   echo -e "${C_G}============================================================${C_0}"
 
-  echo -e " ${C_B}[核心连接参数]${C_0}"
+  echo -e " ${C_B}[连接参数]${C_0}"
   echo -e " - 监听端口        : ${C_Y}${PORT}${C_0}"
   echo -e " - WebSocket 路径  : ${C_Y}${PATH_WS}${C_0}"
   echo -e " - 连接 Token      : ${C_Y}${TOKEN}${C_0}"
@@ -1457,9 +1542,9 @@ show_install_summary() {
   echo
   echo -e " ${C_B}[自动维护]${C_0}"
   echo -e " - GEOIP 数据库    : ${mmdb_text}"
-  echo -e " - 核心自动更新    : $(core_auto_update_status)"
+  echo -e " - 喵速自动更新    : $(core_auto_update_status)"
   echo -e " - 脚本自动更新    : $(script_auto_update_status)"
-  echo -e " - 定时重启        : $(restart_cron_status)"
+  echo -e " - 喵速定时重启    : $(restart_cron_status)"
 
   echo
   echo -e " ${C_B}[管理入口]${C_0}"
@@ -1475,7 +1560,7 @@ show_install_summary() {
 uninstall_flow() {
   local mode="${1:-full}"
   require_root
-  say "开始卸载 MiaoSpeed..."
+  say "开始卸载喵速..."
 
   systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
@@ -1501,7 +1586,7 @@ uninstall_flow() {
     rm -f "$LOCAL_SCRIPT" "$LOCAL_SCRIPT_BAK"
   fi
 
-  ok "MiaoSpeed 已卸载。"
+  ok "喵速已卸载。"
 }
 
 ensure_installed_or_offer() {
@@ -1524,7 +1609,7 @@ usage() {
   bash $0                 首次安装；已安装时进入菜单
   bash $0 menu            打开管理菜单
   bash $0 --self-update   更新本地管理脚本
-  bash $0 --uninstall     卸载 MiaoSpeed
+  bash $0 --uninstall     卸载喵速
 
 安装后可直接输入:
   miao
