@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260522.2"
+SCRIPT_VERSION="20260522.3"
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
 LOCAL_SCRIPT_BAK="/root/${SCRIPT_NAME}.bak"
@@ -35,6 +35,8 @@ OS_TYPE="linux"
 SERVICE_MODE=1 # 1=systemd, 2=procd
 LAST_BACKUP_FILE=""
 INSTALL_INTERRUPTED=0
+CORE_VERSION=""
+CORE_UPDATE_POLICY="latest"
 
 C_G="\033[1;32m"; C_Y="\033[1;33m"; C_R="\033[1;31m"; C_B="\033[1;34m"; C_0="\033[0m"
 say()  { echo -e "${C_B}[*]${C_0} $*"; }
@@ -137,6 +139,10 @@ validate_token() {
   [[ "${1:-}" =~ ^[A-Za-z0-9._/-]+$ ]]
 }
 
+validate_core_version() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
 validate_botid() {
   [[ -z "${1:-}" || "${1:-}" =~ ^[0-9]+(,[0-9]+)*$ ]]
 }
@@ -191,9 +197,20 @@ random_port() {
 fetch_file() {
   local url="$1" output="$2"
   if command_exists curl; then
-    curl -fL --connect-timeout 15 --max-time 180 -o "$output" "$url"
+    curl -fsSL --connect-timeout 15 --max-time 180 -o "$output" "$url"
   elif command_exists wget; then
     wget -q --timeout=180 -O "$output" "$url"
+  else
+    return 1
+  fi
+}
+
+fetch_file_progress() {
+  local url="$1" output="$2"
+  if command_exists curl; then
+    curl -fL --connect-timeout 15 --max-time 180 -o "$output" "$url"
+  elif command_exists wget; then
+    wget --timeout=180 -O "$output" "$url"
   else
     return 1
   fi
@@ -269,6 +286,13 @@ get_latest_core_version() {
   fetch_text "$CORE_API" 2>/dev/null | awk -F '"' '/tag_name/ {print $4; exit}'
 }
 
+normalize_core_version() {
+  local version="${1:-}"
+  version="${version#v}"
+  version="${version#V}"
+  printf '%s' "$version"
+}
+
 find_extracted_binary() {
   local work_dir="$1" candidate
   for candidate in \
@@ -285,6 +309,7 @@ find_extracted_binary() {
 
 download_core_to_workdir() {
   local version="$1" work_dir="$2" file url local_sha remote_sha binary_path
+  version=$(normalize_core_version "$version")
   rm -rf "$work_dir"
   mkdir -p "$work_dir"
 
@@ -292,7 +317,7 @@ download_core_to_workdir() {
   url="https://github.com/${CORE_REPO}/releases/download/${version}/${file}"
 
   say "下载喵速核心: ${version}" >&2
-  fetch_file "$url" "${work_dir}/${file}" || return 1
+  fetch_file_progress "$url" "${work_dir}/${file}" || return 1
 
   if fetch_file "${url}.sha256" "${work_dir}/${file}.sha256" >/dev/null 2>&1; then
     local_sha=$(sha256sum "${work_dir}/${file}" | awk '{print $1}')
@@ -382,7 +407,7 @@ install_local_script() {
   fi
 
   if [ "$copied" -ne 0 ]; then
-    [ "$quiet" = "1" ] || warn "无法从当前运行入口复制脚本，尝试从远端保存本地脚本。"
+    [ "$quiet" = "1" ] || say "当前为远程执行模式，正在保存本地管理脚本..."
     tmp=$(mktemp /root/miaospeed.sh.XXXXXX)
     if fetch_file "$SCRIPT_REMOTE_URL" "$tmp" && validate_script_file "$tmp"; then
       mv -f "$tmp" "$LOCAL_SCRIPT"
@@ -422,6 +447,8 @@ load_config() {
   SPEEDLIMIT=$(get_conf SPEEDLIMIT)
   PAUSESECOND=$(get_conf PAUSESECOND)
   USE_MMDB=$(get_conf USE_MMDB)
+  CORE_VERSION=$(get_conf CORE_VERSION)
+  CORE_UPDATE_POLICY=$(get_conf CORE_UPDATE_POLICY)
 
   PORT="${PORT:-}"
   PATH_WS="${PATH_WS:-}"
@@ -432,6 +459,11 @@ load_config() {
   SPEEDLIMIT="${SPEEDLIMIT:-0}"
   PAUSESECOND="${PAUSESECOND:-0}"
   USE_MMDB="${USE_MMDB:-n}"
+  CORE_VERSION="$(normalize_core_version "${CORE_VERSION:-}")"
+  case "${CORE_UPDATE_POLICY:-latest}" in
+    pinned) CORE_UPDATE_POLICY="pinned" ;;
+    *) CORE_UPDATE_POLICY="latest" ;;
+  esac
 }
 
 write_config() {
@@ -445,6 +477,8 @@ TASKLIMIT="${TASKLIMIT}"
 SPEEDLIMIT="${SPEEDLIMIT}"
 PAUSESECOND="${PAUSESECOND}"
 USE_MMDB="${USE_MMDB}"
+CORE_VERSION="${CORE_VERSION}"
+CORE_UPDATE_POLICY="${CORE_UPDATE_POLICY}"
 EOF
   chmod 600 "$CONF_FILE"
 }
@@ -688,7 +722,7 @@ log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 fetch_file() {
   local url="$1" output="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl -fL --connect-timeout 15 --max-time 180 -o "$output" "$url"
+    curl -fsSL --connect-timeout 15 --max-time 180 -o "$output" "$url"
   else
     wget -q --timeout=180 -O "$output" "$url"
   fi
@@ -715,6 +749,40 @@ trap cleanup EXIT INT TERM
 
 [ -f "$CONF" ] || { log "[Error] 未找到配置文件。"; exit 1; }
 [ -x "$BIN" ] || { log "[Error] 未找到喵速主程序。"; exit 1; }
+
+get_conf() {
+  local key="$1"
+  awk -v key="$key" 'BEGIN { FS="=" } $1 == key {
+    sub(/^[^=]*=/, "")
+    gsub(/^"/, "")
+    gsub(/"$/, "")
+    print
+    exit
+  }' "$CONF" 2>/dev/null
+}
+
+set_conf() {
+  local key="$1" value="$2" tmp_conf
+  tmp_conf="${CONF}.tmp.$$"
+  if grep -q "^${key}=" "$CONF"; then
+    sed "s|^${key}=.*|${key}=\"${value}\"|" "$CONF" > "$tmp_conf"
+  else
+    cp "$CONF" "$tmp_conf"
+    printf '%s="%s"\n' "$key" "$value" >> "$tmp_conf"
+  fi
+  mv -f "$tmp_conf" "$CONF"
+  chmod 600 "$CONF"
+}
+
+CORE_VERSION=$(get_conf CORE_VERSION)
+CORE_UPDATE_POLICY=$(get_conf CORE_UPDATE_POLICY)
+CORE_VERSION="${CORE_VERSION#v}"
+CORE_VERSION="${CORE_VERSION#V}"
+CORE_UPDATE_POLICY="${CORE_UPDATE_POLICY:-latest}"
+if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+  log "[OK] 当前已锁定喵速版本 ${CORE_VERSION:-unknown}，跳过自动更新。"
+  exit 0
+fi
 
 SVC_MODE=$( [ -f "/etc/systemd/system/miaospeed.service" ] && command -v systemctl >/dev/null 2>&1 && echo 1 || echo 2 )
 stop_service() {
@@ -805,6 +873,8 @@ sleep 5
 
 if is_alive; then
   log "[OK] 核心已升级至: ${LAT_VER}"
+  set_conf CORE_VERSION "$LAT_VER"
+  set_conf CORE_UPDATE_POLICY "latest"
   find "$BACKUP" -type f -name "*_bak" -mtime +30 -exec rm -f {} \; 2>/dev/null || true
   exit 0
 fi
@@ -884,7 +954,32 @@ disable_restart_cron() {
 }
 
 core_auto_update_status() {
-  has_cron_line "$UPDATE_SCRIPT" && echo "已开启，每日 04:00" || echo "未开启"
+  load_config
+  if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+    echo "版本已锁定，不可用"
+  else
+    has_cron_line "$UPDATE_SCRIPT" && echo "已开启，每日 04:00" || echo "未开启"
+  fi
+}
+
+current_core_version() {
+  local current
+  current=""
+  if [ -x "${INSTALL_DIR}/miaospeed" ]; then
+    current=$("${INSTALL_DIR}/miaospeed" -version 2>/dev/null | awk '/^version:/ {print $2; exit}' || true)
+  fi
+  printf '%s' "${current:-unknown}"
+}
+
+core_version_status() {
+  local current
+  current=$(current_core_version)
+  load_config
+  if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+    printf '当前 %s，锁定 %s' "$current" "${CORE_VERSION:-unknown}"
+  else
+    printf '当前 %s，跟随最新版' "$current"
+  fi
 }
 
 script_auto_update_status() {
@@ -906,6 +1001,7 @@ print_kv() {
     "喵速自动更新")   echo "  喵速自动更新       : ${value}" ;;
     "脚本自动更新")   echo "  脚本自动更新       : ${value}" ;;
     "喵速定时重启")   echo "  喵速定时重启       : ${value}" ;;
+    "喵速版本")       echo "  喵速版本           : ${value}" ;;
     "运行状态")       echo -e "  运行状态           : ${value}" ;;
     "状态时间")       echo "  状态时间           : ${value}" ;;
     "脚本版本")       echo "  脚本版本           : ${value}" ;;
@@ -931,6 +1027,11 @@ print_menu_item() {
     "喵速自动更新")   echo "  ${number}  喵速自动更新       ${value}" ;;
     "脚本自动更新")   echo "  ${number}  脚本自动更新       ${value}" ;;
     "喵速定时重启")   echo "  ${number}  喵速定时重启       ${value}" ;;
+    "当前版本策略")   echo "  ${number}  当前版本策略       ${value}" ;;
+    "检查最新版")     echo "  ${number}  检查最新版         ${value}" ;;
+    "更新到最新版")   echo "  ${number}  更新到最新版       ${value}" ;;
+    "安装指定版本")   echo "  ${number}  安装指定版本       ${value}" ;;
+    "版本锁定")       echo "  ${number}  版本锁定           ${value}" ;;
     *)                echo "  ${number}  ${label} ${value}" ;;
   esac
 }
@@ -992,6 +1093,7 @@ show_status_config() {
   print_kv "喵速自动更新" "$(core_auto_update_status)"
   print_kv "脚本自动更新" "$(script_auto_update_status)"
   print_kv "喵速定时重启" "$(restart_cron_status)"
+  print_kv "喵速版本" "$(core_version_status)"
 
   echo
   echo "---------------- 服务与文件 ----------------"
@@ -1129,13 +1231,205 @@ edit_runtime_params() {
   pause_menu
 }
 
-check_core_update() {
-  if [ ! -x "$UPDATE_SCRIPT" ]; then
-    warn "更新脚本不存在，正在重新生成。"
+install_core_version() {
+  local target_version="$1" work_dir binary_path ts bin_bak conf_bak
+  target_version=$(normalize_core_version "$target_version")
+  validate_core_version "$target_version" || {
+    err "版本号包含非法字符。"
+    return 1
+  }
+
+  work_dir="${TMP_DIR}/manual-version-work"
+  binary_path=$(download_core_to_workdir "$target_version" "$work_dir") || {
+    rm -rf "$work_dir"
+    err "指定版本下载或校验失败。"
+    return 1
+  }
+
+  mkdir -p "$BACKUP_DIR"
+  ts=$(date +%Y%m%d_%H%M%S)
+  bin_bak="${BACKUP_DIR}/miaospeed_${ts}_bak"
+  conf_bak="${BACKUP_DIR}/miaospeed.conf_${ts}_bak"
+  cp -p "${INSTALL_DIR}/miaospeed" "$bin_bak" || {
+    rm -rf "$work_dir"
+    err "主程序备份失败，已取消。"
+    return 1
+  }
+  cp -p "$CONF_FILE" "$conf_bak" || {
+    rm -rf "$work_dir"
+    err "配置备份失败，已取消。"
+    return 1
+  }
+
+  say "正在切换喵速版本..."
+  stop_service >/dev/null 2>&1 || true
+  cp "$binary_path" "${INSTALL_DIR}/miaospeed.new" || {
+    start_service >/dev/null 2>&1 || true
+    rm -rf "$work_dir"
+    err "写入新版本失败。"
+    return 1
+  }
+  chmod +x "${INSTALL_DIR}/miaospeed.new"
+  mv -f "${INSTALL_DIR}/miaospeed.new" "${INSTALL_DIR}/miaospeed"
+  start_service >/dev/null 2>&1 || true
+  sleep 5
+
+  if is_service_alive; then
+    CORE_VERSION="$target_version"
+    write_config
     create_update_script
+    rm -rf "$work_dir"
+    ok "喵速已切换到版本 ${target_version}。"
+    return 0
   fi
-  bash "$UPDATE_SCRIPT"
-  pause_menu
+
+  warn "新版本启动失败，正在回滚。"
+  stop_service >/dev/null 2>&1 || true
+  cp -p "$bin_bak" "${INSTALL_DIR}/miaospeed" || {
+    rm -rf "$work_dir"
+    err "回滚主程序失败，请手动检查: ${bin_bak}"
+    return 1
+  }
+  cp -p "$conf_bak" "$CONF_FILE" >/dev/null 2>&1 || true
+  chmod +x "${INSTALL_DIR}/miaospeed"
+  start_service >/dev/null 2>&1 || true
+  rm -rf "$work_dir"
+  if is_service_alive; then
+    ok "已恢复旧版本。"
+  else
+    err "回滚后服务仍未运行，请查看日志。"
+  fi
+  return 1
+}
+
+core_update_menu() {
+  local choice latest_version input confirm current lock_after_install
+  while true; do
+    clear
+    echo "=================================================="
+    echo "                检查喵速更新"
+    echo "=================================================="
+    load_config
+    print_menu_item "1." "当前版本策略" "$(core_version_status)"
+    print_menu_item "2." "检查最新版" "从 GitHub 获取"
+    print_menu_item "3." "更新到最新版" "解除锁定并更新"
+    print_menu_item "4." "安装指定版本" "可选择锁定"
+    if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+      print_menu_item "5." "版本锁定" "已锁定 ${CORE_VERSION:-unknown}"
+    else
+      print_menu_item "5." "版本锁定" "未锁定"
+    fi
+    echo "--------------------------------------------------"
+    echo "  0.  返回主菜单"
+    echo "=================================================="
+    read -r -p "请输入序号: " choice
+
+    case "$choice" in
+      1)
+        echo
+        print_kv "喵速版本" "$(core_version_status)"
+        pause_menu
+        ;;
+      2)
+        say "获取喵速最新版本..."
+        latest_version=$(get_latest_core_version || true)
+        if [ -n "$latest_version" ]; then
+          ok "最新版本: ${latest_version}"
+        else
+          err "获取最新版本失败。"
+        fi
+        pause_menu
+        ;;
+      3)
+        say "获取喵速最新版本..."
+        latest_version=$(get_latest_core_version || true)
+        if [ -z "$latest_version" ]; then
+          err "获取最新版本失败。"
+          pause_menu
+          continue
+        fi
+        read -r -p "确认更新到最新版 ${latest_version} 并解除版本锁定? (y/N): " confirm
+        if is_yes "$confirm"; then
+          load_config
+          CORE_UPDATE_POLICY="latest"
+          CORE_VERSION="$(normalize_core_version "$latest_version")"
+          if install_core_version "$latest_version"; then
+            read -r -p "是否恢复每日 04:00 喵速自动更新? (y/N): " confirm
+            is_yes "$confirm" && enable_core_auto_update >/dev/null 2>&1
+          fi
+        else
+          echo "已取消。"
+        fi
+        pause_menu
+        ;;
+      4)
+        read -r -p "请输入喵速版本号，例如 4.6.8 或 v4.6.8: " input
+        input=$(normalize_core_version "$input")
+        if [ -z "$input" ]; then
+          echo "已取消。"
+          pause_menu
+          continue
+        fi
+        validate_core_version "$input" || {
+          err "版本号包含非法字符。"
+          pause_menu
+          continue
+        }
+        read -r -p "是否安装后锁定该版本并关闭喵速自动更新? (Y/n 默认: Y): " confirm
+        load_config
+        lock_after_install=0
+        if [ -z "$confirm" ] || is_yes "$confirm"; then
+          CORE_UPDATE_POLICY="pinned"
+          lock_after_install=1
+        else
+          CORE_UPDATE_POLICY="latest"
+        fi
+        CORE_VERSION="$input"
+        if install_core_version "$input" && [ "$lock_after_install" -eq 1 ]; then
+          disable_core_auto_update >/dev/null 2>&1 || true
+          ok "喵速自动更新已关闭。"
+        fi
+        pause_menu
+        ;;
+      5)
+        load_config
+        if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+          read -r -p "当前已锁定 ${CORE_VERSION:-unknown}，是否解除锁定? (y/N): " confirm
+          if is_yes "$confirm"; then
+            CORE_UPDATE_POLICY="latest"
+            current=$(current_core_version)
+            if [ "$current" != "unknown" ]; then
+              CORE_VERSION="$(normalize_core_version "$current")"
+            fi
+            write_config
+            create_update_script
+            ok "已解除版本锁定。"
+            read -r -p "是否恢复每日 04:00 喵速自动更新? (y/N): " confirm
+            is_yes "$confirm" && enable_core_auto_update >/dev/null 2>&1
+          fi
+        else
+          current=$(current_core_version)
+          if [ "$current" = "unknown" ]; then
+            err "无法识别当前喵速版本，不能锁定。"
+            pause_menu
+            continue
+          fi
+          read -r -p "是否锁定当前喵速版本 ${current}? 锁定后会关闭喵速自动更新。 (y/N): " confirm
+          if is_yes "$confirm"; then
+            CORE_VERSION="$(normalize_core_version "$current")"
+            CORE_UPDATE_POLICY="pinned"
+            disable_core_auto_update >/dev/null 2>&1 || true
+            write_config
+            create_update_script
+            ok "已锁定喵速版本 ${CORE_VERSION:-unknown}，喵速自动更新已关闭。"
+          fi
+        fi
+        pause_menu
+        ;;
+      0) return ;;
+      *) echo "无效选项。"; pause_menu ;;
+    esac
+  done
 }
 
 fetch_remote_script_version() {
@@ -1248,7 +1542,10 @@ auto_maintenance_menu() {
         pause_menu
         ;;
       2)
-        if has_cron_line "$UPDATE_SCRIPT"; then
+        load_config
+        if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+          warn "当前已锁定喵速版本，请先在“检查喵速更新”中解除版本锁定。"
+        elif has_cron_line "$UPDATE_SCRIPT"; then
           disable_core_auto_update && ok "喵速自动更新已关闭。"
         else
           enable_core_auto_update && ok "喵速自动更新已开启，每日 04:00。"
@@ -1379,7 +1676,7 @@ main_menu() {
       3) edit_connection_params ;;
       4) edit_access_control ;;
       5) edit_runtime_params ;;
-      6) check_core_update ;;
+      6) core_update_menu ;;
       7) script_update_menu ;;
       8) auto_maintenance_menu ;;
       9) backup_cleanup_menu ;;
@@ -1398,7 +1695,27 @@ main_menu() {
 }
 
 prompt_initial_config() {
-  local input speed_gbps
+  local input speed_gbps latest_version="${1:-}"
+
+  echo -e "\n${C_G}=== 安装版本 ===${C_0}"
+  if [ -n "$latest_version" ]; then
+    read -r -p "喵速版本 (直接回车安装最新版 ${latest_version}，输入版本号可指定): " input
+  else
+    read -r -p "喵速版本 (直接回车安装默认版本 4.6.1，输入版本号可指定): " input
+  fi
+  if [ -z "$input" ]; then
+    CORE_VERSION="$(normalize_core_version "${latest_version:-4.6.1}")"
+    CORE_UPDATE_POLICY="latest"
+  else
+    CORE_VERSION="$(normalize_core_version "$input")"
+    validate_core_version "$CORE_VERSION" || { err "版本号包含非法字符。"; exit 1; }
+    read -r -p "是否锁定该版本并关闭喵速自动更新? (Y/n 默认: Y): " input
+    if [ -z "$input" ] || is_yes "$input"; then
+      CORE_UPDATE_POLICY="pinned"
+    else
+      CORE_UPDATE_POLICY="latest"
+    fi
+  fi
 
   echo -e "\n${C_G}=== 阶段一: 连接参数 ===${C_0}"
   read -r -p "监听端口 (直接回车随机分配 10000-59999): " input
@@ -1468,8 +1785,13 @@ prompt_initial_config() {
   read -r -p "是否下载并启用 GEOIP 数据库? (y/N 默认: N): " input
   USE_MMDB="${input:-n}"
 
-  read -r -p "是否启用每日 04:00 喵速自动更新? (y/N 默认: N): " input
-  ENABLE_CORE_AUTO_UPDATE="${input:-n}"
+  if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+    warn "当前已锁定喵速版本，已跳过喵速自动更新设置。"
+    ENABLE_CORE_AUTO_UPDATE="n"
+  else
+    read -r -p "是否启用每日 04:00 喵速自动更新? (y/N 默认: N): " input
+    ENABLE_CORE_AUTO_UPDATE="${input:-n}"
+  fi
 
   read -r -p "是否启用每日 03:30 管理脚本自动更新? (y/N 默认: N): " input
   ENABLE_SCRIPT_AUTO_UPDATE="${input:-n}"
@@ -1497,10 +1819,10 @@ install_flow() {
     ok "最新版本: ${latest_version}"
   fi
 
-  prompt_initial_config
+  prompt_initial_config "$latest_version"
 
   work_dir="${TMP_DIR}/install-work"
-  binary_path=$(download_core_to_workdir "$latest_version" "$work_dir") || {
+  binary_path=$(download_core_to_workdir "$CORE_VERSION" "$work_dir") || {
     err "核心程序下载或校验失败。"
     trap - INT TERM
     exit 1
@@ -1591,6 +1913,11 @@ show_install_summary() {
   echo -e " - 喵速自动更新    : $(core_auto_update_status)"
   echo -e " - 脚本自动更新    : $(script_auto_update_status)"
   echo -e " - 喵速定时重启    : $(restart_cron_status)"
+  if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+    echo -e " - 喵速版本        : 已锁定 ${CORE_VERSION:-unknown}"
+  else
+    echo -e " - 喵速版本        : ${CORE_VERSION:-unknown}，跟随最新版"
+  fi
 
   echo
   echo -e " ${C_B}[管理入口]${C_0}"
