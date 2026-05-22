@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260522.5" # Re8 发布，基于 Re7
+SCRIPT_VERSION="20260522.6" # Re9 发布，基于 Re8
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
 LOCAL_SCRIPT_BAK="/root/${SCRIPT_NAME}.bak"
@@ -48,6 +48,64 @@ err()  { echo -e "${C_R}[X]${C_0} $*"; }
 pause_menu() {
   echo
   read -r -p "按回车返回..." _
+}
+
+menu_child_interrupt_handler() {
+  trap - INT TERM
+  echo
+  warn "操作已取消，返回主菜单。"
+  exit 130
+}
+
+run_menu_action() {
+  local action="$1"
+  shift || true
+  trap ':' INT TERM
+  (
+    trap menu_child_interrupt_handler INT TERM
+    "$action" "$@"
+  )
+  local status=$?
+  trap - INT TERM
+  case "$status" in
+    0) return 0 ;;
+    130)
+      trap ':' INT TERM
+      pause_menu
+      trap - INT TERM
+      return 0
+      ;;
+    111|112) return "$status" ;;
+    *) return "$status" ;;
+  esac
+}
+
+show_status_config_menu() {
+  show_status_config
+  pause_menu
+}
+
+view_logs_menu() {
+  view_logs
+  trap menu_child_interrupt_handler INT TERM
+  pause_menu
+}
+
+uninstall_menu_action() {
+  local confirm
+  read -r -p "确认卸载喵速并删除相关文件吗? (y/N): " confirm
+  if is_yes "$confirm"; then
+    return 112
+  fi
+  echo "已取消。"
+  pause_menu
+}
+
+main_menu_interrupt_handler() {
+  trap - INT TERM
+  echo
+  warn "已退出喵速管理控制台。"
+  exit 130
 }
 
 install_interrupt_handler() {
@@ -233,6 +291,33 @@ remove_botid_notes() {
 clear_botid_notes() {
   ensure_botid_notes_file
   : > "$BOTID_NOTES_FILE"
+}
+
+backup_botid_notes_snapshot() {
+  local __had_var="$1" __file_var="$2" tmp_notes
+  printf -v "$__had_var" 0
+  printf -v "$__file_var" ''
+  if [ -f "$BOTID_NOTES_FILE" ]; then
+    printf -v "$__had_var" 1
+    mkdir -p "$TMP_DIR"
+    tmp_notes=$(mktemp "${TMP_DIR}/botid-notes.XXXXXX" 2>/dev/null || mktemp /tmp/botid-notes.XXXXXX)
+    cp "$BOTID_NOTES_FILE" "$tmp_notes" 2>/dev/null || true
+    printf -v "$__file_var" '%s' "$tmp_notes"
+  fi
+}
+
+restore_botid_notes_snapshot() {
+  local had_notes="$1" old_notes="$2"
+  if [ "$had_notes" -eq 1 ]; then
+    [ -n "$old_notes" ] && cp "$old_notes" "$BOTID_NOTES_FILE" 2>/dev/null || true
+  else
+    rm -f "$BOTID_NOTES_FILE"
+  fi
+}
+
+cleanup_botid_notes_snapshot() {
+  local old_notes="$1"
+  [ -n "$old_notes" ] && rm -f "$old_notes"
 }
 
 print_botid_whitelist_table() {
@@ -1277,27 +1362,23 @@ edit_connection_params() {
 }
 
 add_botid_menu() {
-  local input ids id note old_whitelist old_notes tmp_notes had_notes=0 existed=0 changed=0 _botid_items
+  local input ids id note old_whitelist old_notes had_notes=0 existed=0 changed=0 _botid_items
   load_config
   old_whitelist="$WHITELIST"
-  old_notes=""
-  if [ -f "$BOTID_NOTES_FILE" ]; then
-    had_notes=1
-    mkdir -p "$TMP_DIR"
-    tmp_notes=$(mktemp "${TMP_DIR}/botid-notes.XXXXXX" 2>/dev/null || mktemp /tmp/botid-notes.XXXXXX)
-    cp "$BOTID_NOTES_FILE" "$tmp_notes" 2>/dev/null || true
-    old_notes="$tmp_notes"
-  fi
+  backup_botid_notes_snapshot had_notes old_notes
+  trap 'restore_botid_notes_snapshot "$had_notes" "$old_notes"; cleanup_botid_notes_snapshot "$old_notes"; menu_child_interrupt_handler' INT TERM
 
   read -r -p "请输入要添加的 BotID，多个用英文逗号分隔: " input
   ids=$(normalize_botid_list "$input")
   if [ -z "$ids" ]; then
-    [ -n "$old_notes" ] && rm -f "$old_notes"
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     echo "已取消。"
     return 0
   fi
   validate_botid "$ids" || {
-    [ -n "$old_notes" ] && rm -f "$old_notes"
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     err "BotID 仅允许数字和英文逗号。"
     return 1
   }
@@ -1321,36 +1402,29 @@ add_botid_menu() {
   done
 
   if [ "$WHITELIST" != "$old_whitelist" ]; then
+    trap menu_child_interrupt_handler INT TERM
     if ! apply_config_and_restart; then
-      if [ "$had_notes" -eq 1 ]; then
-        [ -n "$old_notes" ] && cp "$old_notes" "$BOTID_NOTES_FILE" 2>/dev/null || true
-      else
-        rm -f "$BOTID_NOTES_FILE"
-      fi
+      restore_botid_notes_snapshot "$had_notes" "$old_notes"
     fi
   elif [ "$changed" -eq 0 ] && [ "$existed" -eq 0 ]; then
     echo "访问控制未变化。"
   elif [ "$changed" -eq 0 ]; then
     ok "备注已更新。"
   fi
-  [ -n "$old_notes" ] && rm -f "$old_notes"
+  cleanup_botid_notes_snapshot "$old_notes"
+  trap menu_child_interrupt_handler INT TERM
 }
 
 remove_botid_menu() {
-  local input ids old_whitelist old_notes tmp_notes had_notes=0
+  local input ids old_whitelist old_notes had_notes=0
   load_config
   old_whitelist="$WHITELIST"
-  old_notes=""
-  if [ -f "$BOTID_NOTES_FILE" ]; then
-    had_notes=1
-    mkdir -p "$TMP_DIR"
-    tmp_notes=$(mktemp "${TMP_DIR}/botid-notes.XXXXXX" 2>/dev/null || mktemp /tmp/botid-notes.XXXXXX)
-    cp "$BOTID_NOTES_FILE" "$tmp_notes" 2>/dev/null || true
-    old_notes="$tmp_notes"
-  fi
+  backup_botid_notes_snapshot had_notes old_notes
+  trap 'restore_botid_notes_snapshot "$had_notes" "$old_notes"; cleanup_botid_notes_snapshot "$old_notes"; menu_child_interrupt_handler' INT TERM
 
   if [ -z "$WHITELIST" ]; then
-    [ -n "$old_notes" ] && rm -f "$old_notes"
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     echo "当前白名单为空，访问控制为允许所有。"
     return 0
   fi
@@ -1358,12 +1432,14 @@ remove_botid_menu() {
   read -r -p "请输入要删除的 BotID，多个用英文逗号分隔: " input
   ids=$(normalize_botid_list "$input")
   if [ -z "$ids" ]; then
-    [ -n "$old_notes" ] && rm -f "$old_notes"
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     echo "已取消。"
     return 0
   fi
   validate_botid "$ids" || {
-    [ -n "$old_notes" ] && rm -f "$old_notes"
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     err "BotID 仅允许数字和英文逗号。"
     return 1
   }
@@ -1373,21 +1449,23 @@ remove_botid_menu() {
   if [ "$WHITELIST" = "$old_whitelist" ]; then
     echo "访问控制未变化。"
   else
+    trap menu_child_interrupt_handler INT TERM
     if ! apply_config_and_restart; then
-      if [ "$had_notes" -eq 1 ]; then
-        [ -n "$old_notes" ] && cp "$old_notes" "$BOTID_NOTES_FILE" 2>/dev/null || true
-      else
-        rm -f "$BOTID_NOTES_FILE"
-      fi
+      restore_botid_notes_snapshot "$had_notes" "$old_notes"
     fi
   fi
-  [ -n "$old_notes" ] && rm -f "$old_notes"
+  cleanup_botid_notes_snapshot "$old_notes"
+  trap menu_child_interrupt_handler INT TERM
 }
 
 edit_botid_note_menu() {
-  local id note
+  local id note old_notes had_notes=0
   load_config
+  backup_botid_notes_snapshot had_notes old_notes
+  trap 'restore_botid_notes_snapshot "$had_notes" "$old_notes"; cleanup_botid_notes_snapshot "$old_notes"; menu_child_interrupt_handler' INT TERM
   if [ -z "$WHITELIST" ]; then
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     echo "当前白名单为空，没有可备注的 BotID。"
     return 0
   fi
@@ -1395,10 +1473,14 @@ edit_botid_note_menu() {
   read -r -p "请输入要修改备注的 BotID: " id
   id=$(normalize_botid_list "$id")
   validate_single_botid "$id" || {
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     err "BotID 必须是纯数字。"
     return 1
   }
   if ! botid_exists "$id"; then
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     err "BotID ${id} 不在当前白名单中。"
     return 1
   fi
@@ -1406,43 +1488,41 @@ edit_botid_note_menu() {
   read -r -p "请输入新备注，留空表示清除备注: " note
   set_botid_note "$id" "$note"
   ok "备注已更新。"
+  cleanup_botid_notes_snapshot "$old_notes"
+  trap menu_child_interrupt_handler INT TERM
 }
 
 clear_whitelist_menu() {
-  local confirm old_notes tmp_notes had_notes=0
+  local confirm old_notes had_notes=0
   load_config
+  backup_botid_notes_snapshot had_notes old_notes
+  trap 'restore_botid_notes_snapshot "$had_notes" "$old_notes"; cleanup_botid_notes_snapshot "$old_notes"; menu_child_interrupt_handler' INT TERM
   if [ -z "$WHITELIST" ]; then
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     echo "当前白名单已为空，访问控制为允许所有。"
     return 0
   fi
 
   read -r -p "确认清空 BotID 白名单并允许所有吗? (y/N): " confirm
   if ! is_yes "$confirm"; then
+    cleanup_botid_notes_snapshot "$old_notes"
+    trap menu_child_interrupt_handler INT TERM
     echo "已取消。"
     return 0
   fi
 
   WHITELIST=""
-  old_notes=""
-  if [ -f "$BOTID_NOTES_FILE" ]; then
-    had_notes=1
-    mkdir -p "$TMP_DIR"
-    tmp_notes=$(mktemp "${TMP_DIR}/botid-notes.XXXXXX" 2>/dev/null || mktemp /tmp/botid-notes.XXXXXX)
-    cp "$BOTID_NOTES_FILE" "$tmp_notes" 2>/dev/null || true
-    old_notes="$tmp_notes"
-  fi
   read -r -p "是否同时清空 BotID 备注? (Y/n 默认: Y): " confirm
   if [ -z "$confirm" ] || is_yes "$confirm"; then
     clear_botid_notes
   fi
+  trap menu_child_interrupt_handler INT TERM
   if ! apply_config_and_restart; then
-    if [ "$had_notes" -eq 1 ]; then
-      [ -n "$old_notes" ] && cp "$old_notes" "$BOTID_NOTES_FILE" 2>/dev/null || true
-    else
-      rm -f "$BOTID_NOTES_FILE"
-    fi
+    restore_botid_notes_snapshot "$had_notes" "$old_notes"
   fi
-  [ -n "$old_notes" ] && rm -f "$old_notes"
+  cleanup_botid_notes_snapshot "$old_notes"
+  trap menu_child_interrupt_handler INT TERM
 }
 
 edit_access_control() {
@@ -1725,7 +1805,7 @@ fetch_remote_script_version() {
 }
 
 self_update() {
-  local remote_version tmp
+  local remote_version tmp reload_menu="${1:-}"
   tmp=$(mktemp /root/miaospeed.sh.XXXXXX)
 
   if ! fetch_file "$SCRIPT_REMOTE_URL" "$tmp"; then
@@ -1754,6 +1834,7 @@ self_update() {
     chmod 700 "$LOCAL_SCRIPT"
     create_launcher
     ok "管理脚本已更新到 ${remote_version}。"
+    [ "$reload_menu" = "reload-menu" ] && return 111
     return 0
   fi
 
@@ -1777,7 +1858,8 @@ script_update_menu() {
   echo
   read -r -p "是否现在更新管理脚本? (y/N): " confirm
   if is_yes "$confirm"; then
-    self_update
+    self_update "reload-menu"
+    return $?
   else
     echo "已取消。"
   fi
@@ -1968,29 +2050,38 @@ show_menu() {
 }
 
 main_menu() {
-  local choice confirm
+  local choice action_status
   detect_environment 1
   ensure_dirs
   while true; do
+    trap main_menu_interrupt_handler INT TERM
     show_menu
     read -r -p "请输入序号: " choice
+    trap - INT TERM
     case "$choice" in
-      1) show_status_config; pause_menu ;;
-      2) view_logs; pause_menu ;;
-      3) edit_connection_params ;;
-      4) edit_access_control ;;
-      5) edit_runtime_params ;;
-      6) core_update_menu ;;
-      7) script_update_menu ;;
-      8) auto_maintenance_menu ;;
-      9) backup_cleanup_menu ;;
+      1) run_menu_action show_status_config_menu ;;
+      2) run_menu_action view_logs_menu ;;
+      3) run_menu_action edit_connection_params ;;
+      4) run_menu_action edit_access_control ;;
+      5) run_menu_action edit_runtime_params ;;
+      6) run_menu_action core_update_menu ;;
+      7)
+        run_menu_action script_update_menu
+        action_status=$?
+        if [ "$action_status" -eq 111 ]; then
+          say "管理脚本已更新，正在重新载入新版控制台..."
+          exec /bin/bash "$LOCAL_SCRIPT" menu
+        fi
+        ;;
+      8) run_menu_action auto_maintenance_menu ;;
+      9) run_menu_action backup_cleanup_menu ;;
       10)
-        read -r -p "确认卸载喵速并删除相关文件吗? (y/N): " confirm
-        if is_yes "$confirm"; then
+        run_menu_action uninstall_menu_action
+        action_status=$?
+        if [ "$action_status" -eq 112 ]; then
           uninstall_flow "full"
           exit 0
         fi
-        pause_menu
         ;;
       0) exit 0 ;;
       *) echo "无效选项。"; pause_menu ;;
