@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260522.3"
+SCRIPT_VERSION="20260522.4"
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
 LOCAL_SCRIPT_BAK="/root/${SCRIPT_NAME}.bak"
@@ -22,6 +22,7 @@ TMP_DIR="${INSTALL_DIR}/tmp"
 BACKUP_DIR="${INSTALL_DIR}/backup"
 
 CONF_FILE="${INSTALL_DIR}/miaospeed.conf"
+BOTID_NOTES_FILE="${INSTALL_DIR}/botid_notes.tsv"
 RUN_SCRIPT="${INSTALL_DIR}/run.sh"
 UPDATE_SCRIPT="${INSTALL_DIR}/update.sh"
 SERVICE_NAME="miaospeed"
@@ -145,6 +146,111 @@ validate_core_version() {
 
 validate_botid() {
   [[ -z "${1:-}" || "${1:-}" =~ ^[0-9]+(,[0-9]+)*$ ]]
+}
+
+validate_single_botid() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+normalize_botid_list() {
+  local raw="${1:-}"
+  raw=$(printf '%s' "$raw" | tr -d '[:space:]')
+  raw=$(printf '%s' "$raw" | sed -e 's/，/,/g' -e 's/,,*/,/g' -e 's/^,//' -e 's/,$//')
+  printf '%s' "$raw"
+}
+
+botid_exists() {
+  local id="$1"
+  case ",${WHITELIST:-}," in
+    *,"$id",*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+add_botids_to_whitelist() {
+  local ids="$1" id result _botid_items
+  result="${WHITELIST:-}"
+  IFS=',' read -r -a _botid_items <<< "$ids"
+  for id in "${_botid_items[@]}"; do
+    [ -n "$id" ] || continue
+    case ",${result}," in
+      *,"$id",*) ;;
+      *) result="${result:+$result,}$id" ;;
+    esac
+  done
+  WHITELIST="$result"
+}
+
+remove_botids_from_whitelist() {
+  local ids="$1" item result _whitelist_items
+  result=""
+  IFS=',' read -r -a _whitelist_items <<< "${WHITELIST:-}"
+  for item in "${_whitelist_items[@]}"; do
+    [ -n "$item" ] || continue
+    case ",${ids}," in
+      *,"$item",*) ;;
+      *) result="${result:+$result,}$item" ;;
+    esac
+  done
+  WHITELIST="$result"
+}
+
+ensure_botid_notes_file() {
+  mkdir -p "$INSTALL_DIR"
+  [ -f "$BOTID_NOTES_FILE" ] || : > "$BOTID_NOTES_FILE"
+  chmod 600 "$BOTID_NOTES_FILE" 2>/dev/null || true
+}
+
+get_botid_note() {
+  local id="$1"
+  [ -f "$BOTID_NOTES_FILE" ] || return 0
+  awk -F '\t' -v id="$id" '$1 == id {print $2; exit}' "$BOTID_NOTES_FILE" 2>/dev/null
+}
+
+set_botid_note() {
+  local id="$1" note="${2:-}" tmp
+  validate_single_botid "$id" || return 1
+  ensure_botid_notes_file
+  tmp="${BOTID_NOTES_FILE}.tmp.$$"
+  awk -F '\t' -v id="$id" '$1 != id {print $0}' "$BOTID_NOTES_FILE" > "$tmp" 2>/dev/null || true
+  if [ -n "$note" ]; then
+    note=$(printf '%s' "$note" | tr '\t\r\n' '   ')
+    printf '%s\t%s\n' "$id" "$note" >> "$tmp"
+  fi
+  mv -f "$tmp" "$BOTID_NOTES_FILE"
+  chmod 600 "$BOTID_NOTES_FILE" 2>/dev/null || true
+}
+
+remove_botid_notes() {
+  local ids="$1" tmp
+  [ -f "$BOTID_NOTES_FILE" ] || return 0
+  tmp="${BOTID_NOTES_FILE}.tmp.$$"
+  awk -F '\t' -v ids=",${ids}," 'index(ids, "," $1 ",") == 0 {print $0}' "$BOTID_NOTES_FILE" > "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$BOTID_NOTES_FILE"
+  chmod 600 "$BOTID_NOTES_FILE" 2>/dev/null || true
+}
+
+clear_botid_notes() {
+  ensure_botid_notes_file
+  : > "$BOTID_NOTES_FILE"
+}
+
+print_botid_whitelist_table() {
+  local id note index=1 _whitelist_items
+  if [ -z "${WHITELIST:-}" ]; then
+    echo "  BotID 白名单       : 允许所有"
+    return 0
+  fi
+
+  echo "  BotID 白名单:"
+  IFS=',' read -r -a _whitelist_items <<< "$WHITELIST"
+  for id in "${_whitelist_items[@]}"; do
+    [ -n "$id" ] || continue
+    note=$(get_botid_note "$id")
+    [ -n "$note" ] || note="未备注"
+    printf "  %-3s %-16s %s\n" "${index}." "$id" "$note"
+    index=$((index + 1))
+  done
 }
 
 gbps_to_bytes() {
@@ -487,6 +593,9 @@ backup_config() {
   mkdir -p "$BACKUP_DIR"
   LAST_BACKUP_FILE="${BACKUP_DIR}/miaospeed.conf_$(date +%Y%m%d_%H%M%S)_$$_bak"
   cp "$CONF_FILE" "$LAST_BACKUP_FILE"
+  if [ -f "$BOTID_NOTES_FILE" ]; then
+    cp "$BOTID_NOTES_FILE" "${LAST_BACKUP_FILE}.botid_notes"
+  fi
 }
 
 latest_config_backup() {
@@ -512,6 +621,10 @@ restore_latest_config_backup() {
     return 1
   }
   chmod 600 "$CONF_FILE"
+  if [ -f "${latest}.botid_notes" ]; then
+    cp "${latest}.botid_notes" "$BOTID_NOTES_FILE" || true
+    chmod 600 "$BOTID_NOTES_FILE" 2>/dev/null || true
+  fi
 
   say "配置已恢复，正在重启服务..."
   if restart_service; then
@@ -1063,12 +1176,11 @@ service_status_text() {
 }
 
 show_status_config() {
-  local mmdb_text speed_text whitelist_text
+  local mmdb_text speed_text
   load_config
   mmdb_text="未启用"
   is_yes "$USE_MMDB" && mmdb_text="已启用"
   speed_text=$(format_speed_text "$SPEEDLIMIT")
-  whitelist_text="${WHITELIST:-允许所有}"
 
   echo
   echo "---------------- 连接参数 ----------------"
@@ -1078,7 +1190,7 @@ show_status_config() {
 
   echo
   echo "---------------- 访问控制 ----------------"
-  print_kv "BotID 白名单" "$whitelist_text"
+  print_botid_whitelist_table
 
   echo
   echo "---------------- 运行参数 ----------------"
@@ -1162,30 +1274,202 @@ edit_connection_params() {
   pause_menu
 }
 
-edit_access_control() {
-  local old_whitelist input
+add_botid_menu() {
+  local input ids id note old_whitelist old_notes tmp_notes had_notes=0 existed=0 changed=0 _botid_items
   load_config
   old_whitelist="$WHITELIST"
-
-  echo
-  echo "---------------- 修改访问控制 ----------------"
-  echo "多个 BotID 使用英文逗号分隔；直接回车保持不变，输入 all 清空白名单。"
-  read -r -p "BotID 白名单 [当前 ${WHITELIST:-允许所有}]: " input
-  if [ -n "$input" ]; then
-    if [ "$input" = "all" ] || [ "$input" = "ALL" ]; then
-      WHITELIST=""
-    else
-      WHITELIST="$input"
-    fi
+  old_notes=""
+  if [ -f "$BOTID_NOTES_FILE" ]; then
+    had_notes=1
+    mkdir -p "$TMP_DIR"
+    tmp_notes=$(mktemp "${TMP_DIR}/botid-notes.XXXXXX" 2>/dev/null || mktemp /tmp/botid-notes.XXXXXX)
+    cp "$BOTID_NOTES_FILE" "$tmp_notes" 2>/dev/null || true
+    old_notes="$tmp_notes"
   fi
-  validate_botid "$WHITELIST" || { err "BotID 白名单仅允许数字和英文逗号，或留空。"; pause_menu; return; }
 
+  read -r -p "请输入要添加的 BotID，多个用英文逗号分隔: " input
+  ids=$(normalize_botid_list "$input")
+  if [ -z "$ids" ]; then
+    [ -n "$old_notes" ] && rm -f "$old_notes"
+    echo "已取消。"
+    return 0
+  fi
+  validate_botid "$ids" || {
+    [ -n "$old_notes" ] && rm -f "$old_notes"
+    err "BotID 仅允许数字和英文逗号。"
+    return 1
+  }
+
+  IFS=',' read -r -a _botid_items <<< "$ids"
+  for id in "${_botid_items[@]}"; do
+    [ -n "$id" ] || continue
+    if botid_exists "$id"; then
+      existed=1
+      read -r -p "BotID ${id} 已存在，是否更新备注? (y/N): " input
+      if is_yes "$input"; then
+        read -r -p "备注 ${id}（留空清除备注）: " note
+        set_botid_note "$id" "$note"
+      fi
+    else
+      add_botids_to_whitelist "$id"
+      read -r -p "备注 ${id}（可留空）: " note
+      set_botid_note "$id" "$note"
+      changed=1
+    fi
+  done
+
+  if [ "$WHITELIST" != "$old_whitelist" ]; then
+    if ! apply_config_and_restart; then
+      if [ "$had_notes" -eq 1 ]; then
+        [ -n "$old_notes" ] && cp "$old_notes" "$BOTID_NOTES_FILE" 2>/dev/null || true
+      else
+        rm -f "$BOTID_NOTES_FILE"
+      fi
+    fi
+  elif [ "$changed" -eq 0 ] && [ "$existed" -eq 0 ]; then
+    echo "访问控制未变化。"
+  elif [ "$changed" -eq 0 ]; then
+    ok "备注已更新。"
+  fi
+  [ -n "$old_notes" ] && rm -f "$old_notes"
+}
+
+remove_botid_menu() {
+  local input ids old_whitelist old_notes tmp_notes had_notes=0
+  load_config
+  old_whitelist="$WHITELIST"
+  old_notes=""
+  if [ -f "$BOTID_NOTES_FILE" ]; then
+    had_notes=1
+    mkdir -p "$TMP_DIR"
+    tmp_notes=$(mktemp "${TMP_DIR}/botid-notes.XXXXXX" 2>/dev/null || mktemp /tmp/botid-notes.XXXXXX)
+    cp "$BOTID_NOTES_FILE" "$tmp_notes" 2>/dev/null || true
+    old_notes="$tmp_notes"
+  fi
+
+  if [ -z "$WHITELIST" ]; then
+    [ -n "$old_notes" ] && rm -f "$old_notes"
+    echo "当前白名单为空，访问控制为允许所有。"
+    return 0
+  fi
+
+  read -r -p "请输入要删除的 BotID，多个用英文逗号分隔: " input
+  ids=$(normalize_botid_list "$input")
+  if [ -z "$ids" ]; then
+    [ -n "$old_notes" ] && rm -f "$old_notes"
+    echo "已取消。"
+    return 0
+  fi
+  validate_botid "$ids" || {
+    [ -n "$old_notes" ] && rm -f "$old_notes"
+    err "BotID 仅允许数字和英文逗号。"
+    return 1
+  }
+
+  remove_botids_from_whitelist "$ids"
+  remove_botid_notes "$ids"
   if [ "$WHITELIST" = "$old_whitelist" ]; then
     echo "访问控制未变化。"
   else
-    apply_config_and_restart
+    if ! apply_config_and_restart; then
+      if [ "$had_notes" -eq 1 ]; then
+        [ -n "$old_notes" ] && cp "$old_notes" "$BOTID_NOTES_FILE" 2>/dev/null || true
+      else
+        rm -f "$BOTID_NOTES_FILE"
+      fi
+    fi
   fi
-  pause_menu
+  [ -n "$old_notes" ] && rm -f "$old_notes"
+}
+
+edit_botid_note_menu() {
+  local id note
+  load_config
+  if [ -z "$WHITELIST" ]; then
+    echo "当前白名单为空，没有可备注的 BotID。"
+    return 0
+  fi
+
+  read -r -p "请输入要修改备注的 BotID: " id
+  id=$(normalize_botid_list "$id")
+  validate_single_botid "$id" || {
+    err "BotID 必须是纯数字。"
+    return 1
+  }
+  if ! botid_exists "$id"; then
+    err "BotID ${id} 不在当前白名单中。"
+    return 1
+  fi
+
+  read -r -p "请输入新备注，留空表示清除备注: " note
+  set_botid_note "$id" "$note"
+  ok "备注已更新。"
+}
+
+clear_whitelist_menu() {
+  local confirm old_notes tmp_notes had_notes=0
+  load_config
+  if [ -z "$WHITELIST" ]; then
+    echo "当前白名单已为空，访问控制为允许所有。"
+    return 0
+  fi
+
+  read -r -p "确认清空 BotID 白名单并允许所有吗? (y/N): " confirm
+  if ! is_yes "$confirm"; then
+    echo "已取消。"
+    return 0
+  fi
+
+  WHITELIST=""
+  old_notes=""
+  if [ -f "$BOTID_NOTES_FILE" ]; then
+    had_notes=1
+    mkdir -p "$TMP_DIR"
+    tmp_notes=$(mktemp "${TMP_DIR}/botid-notes.XXXXXX" 2>/dev/null || mktemp /tmp/botid-notes.XXXXXX)
+    cp "$BOTID_NOTES_FILE" "$tmp_notes" 2>/dev/null || true
+    old_notes="$tmp_notes"
+  fi
+  read -r -p "是否同时清空 BotID 备注? (Y/n 默认: Y): " confirm
+  if [ -z "$confirm" ] || is_yes "$confirm"; then
+    clear_botid_notes
+  fi
+  if ! apply_config_and_restart; then
+    if [ "$had_notes" -eq 1 ]; then
+      [ -n "$old_notes" ] && cp "$old_notes" "$BOTID_NOTES_FILE" 2>/dev/null || true
+    else
+      rm -f "$BOTID_NOTES_FILE"
+    fi
+  fi
+  [ -n "$old_notes" ] && rm -f "$old_notes"
+}
+
+edit_access_control() {
+  local choice
+  while true; do
+    clear
+    echo "=================================================="
+    echo "                修改访问控制"
+    echo "=================================================="
+    load_config
+    print_botid_whitelist_table
+    echo "--------------------------------------------------"
+    echo "  1.  添加 BotID"
+    echo "  2.  删除 BotID"
+    echo "  3.  修改备注"
+    echo "  4.  清空白名单"
+    echo "  0.  返回主菜单"
+    echo "=================================================="
+    read -r -p "请输入序号: " choice
+
+    case "$choice" in
+      1) add_botid_menu; pause_menu ;;
+      2) remove_botid_menu; pause_menu ;;
+      3) edit_botid_note_menu; pause_menu ;;
+      4) clear_whitelist_menu; pause_menu ;;
+      0) return ;;
+      *) echo "无效选项。"; pause_menu ;;
+    esac
+  done
 }
 
 edit_runtime_params() {
@@ -1578,7 +1862,7 @@ backup_cleanup_menu() {
   local choice confirm count latest
   while true; do
     clear
-    count=$(find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" 2>/dev/null | wc -l | awk '{print $1}')
+    count=$(find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" ! -name "*.botid_notes" 2>/dev/null | wc -l | awk '{print $1}')
     latest=$(latest_config_backup)
 
     echo "=================================================="
@@ -1620,14 +1904,14 @@ backup_cleanup_menu() {
         pause_menu
         ;;
       3)
-        find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" -mtime +30 -exec rm -f {} \; 2>/dev/null
+        find "$BACKUP_DIR" -type f \( -name "miaospeed.conf_*_bak" -o -name "miaospeed.conf_*_bak.botid_notes" \) -mtime +30 -exec rm -f {} \; 2>/dev/null
         ok "已清理 30 天前配置备份。"
         pause_menu
         ;;
       4)
         read -r -p "确认清理所有配置备份文件吗? (y/N): " confirm
         if is_yes "$confirm"; then
-          find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" -exec rm -f {} \; 2>/dev/null
+          find "$BACKUP_DIR" -type f \( -name "miaospeed.conf_*_bak" -o -name "miaospeed.conf_*_bak.botid_notes" \) -exec rm -f {} \; 2>/dev/null
           ok "所有配置备份文件已清理。"
         else
           echo "已取消。"
@@ -1695,7 +1979,7 @@ main_menu() {
 }
 
 prompt_initial_config() {
-  local input speed_gbps latest_version="${1:-}"
+  local input note speed_gbps latest_version="${1:-}"
 
   echo -e "\n${C_G}=== 安装版本 ===${C_0}"
   if [ -n "$latest_version" ]; then
@@ -1752,8 +2036,17 @@ prompt_initial_config() {
 
   echo -e "\n${C_Y}=== 阶段二: 访问控制 ===${C_0}"
   read -r -p "BotID 白名单 (留空允许所有，多个 ID 用英文逗号分隔): " input
-  WHITELIST="${input:-}"
+  WHITELIST="$(normalize_botid_list "${input:-}")"
   validate_botid "$WHITELIST" || { err "BotID 白名单仅允许数字和英文逗号，或留空。"; exit 1; }
+  if [ -n "$WHITELIST" ]; then
+    ensure_botid_notes_file
+    IFS=',' read -r -a _botid_items <<< "$WHITELIST"
+    for input in "${_botid_items[@]}"; do
+      [ -n "$input" ] || continue
+      read -r -p "备注 ${input}（可留空）: " note
+      set_botid_note "$input" "$note"
+    done
+  fi
 
   echo -e "\n${C_Y}=== 阶段三: 运行参数 ===${C_0}"
   read -r -p "是否手工配置运行参数? (y/N 默认: N): " input
@@ -1881,11 +2174,10 @@ install_flow() {
 }
 
 show_install_summary() {
-  local mmdb_text speed_text whitelist_text
+  local mmdb_text speed_text
   mmdb_text="未启用"
   is_yes "$USE_MMDB" && mmdb_text="已启用 (${DATA_DIR})"
   speed_text=$(format_speed_text "$SPEEDLIMIT")
-  whitelist_text="${WHITELIST:-允许所有}"
 
   echo -e "\n${C_G}============================================================${C_0}"
   echo -e " 喵速部署完成"
@@ -1898,7 +2190,7 @@ show_install_summary() {
 
   echo
   echo -e " ${C_B}[访问控制]${C_0}"
-  echo -e " - BotID 白名单    : ${whitelist_text}"
+  print_botid_whitelist_table
 
   echo
   echo -e " ${C_B}[运行参数]${C_0}"
