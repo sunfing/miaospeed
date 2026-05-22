@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260522.4"
+SCRIPT_VERSION="20260522.5" # Re8 发布，基于 Re7
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
 LOCAL_SCRIPT_BAK="/root/${SCRIPT_NAME}.bak"
@@ -1205,15 +1205,17 @@ show_status_config() {
   print_kv "喵速自动更新" "$(core_auto_update_status)"
   print_kv "脚本自动更新" "$(script_auto_update_status)"
   print_kv "喵速定时重启" "$(restart_cron_status)"
+
+  echo
+  echo "---------------- 版本信息 ----------------"
   print_kv "喵速版本" "$(core_version_status)"
+  print_kv "脚本版本" "$SCRIPT_VERSION"
 
   echo
   echo "---------------- 服务与文件 ----------------"
   service_status_text
-  print_kv "脚本版本" "$SCRIPT_VERSION"
   print_kv "本地脚本" "$LOCAL_SCRIPT"
   print_kv "快捷入口" "$LAUNCHER"
-  print_kv "运行日志" "${LOG_DIR}/miaospeed.log"
 }
 
 view_logs() {
@@ -1859,22 +1861,26 @@ auto_maintenance_menu() {
 }
 
 backup_cleanup_menu() {
-  local choice confirm count latest
+  local choice confirm count latest script_backup_text
   while true; do
     clear
     count=$(find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" ! -name "*.botid_notes" 2>/dev/null | wc -l | awk '{print $1}')
     latest=$(latest_config_backup)
+    script_backup_text="无"
+    [ -f "$LOCAL_SCRIPT_BAK" ] && script_backup_text="$LOCAL_SCRIPT_BAK"
 
     echo "=================================================="
-    echo "              配置备份与清理"
+    echo "                备份与清理"
     echo "=================================================="
     echo "配置备份数量: ${count}"
+    echo "管理脚本备份: ${script_backup_text}"
     [ -n "${latest:-}" ] && echo "最近配置备份: ${latest}"
     echo "--------------------------------------------------"
     echo "  1.  立即备份配置"
     echo "  2.  恢复最近配置备份"
     echo "  3.  清理 30 天前配置备份"
     echo "  4.  清理所有配置备份"
+    echo "  5.  清理管理脚本备份"
     echo "  0.  返回主菜单"
     echo "=================================================="
     read -r -p "请输入序号: " choice
@@ -1918,6 +1924,20 @@ backup_cleanup_menu() {
         fi
         pause_menu
         ;;
+      5)
+        if [ -f "$LOCAL_SCRIPT_BAK" ]; then
+          read -r -p "确认删除管理脚本备份 ${LOCAL_SCRIPT_BAK} 吗? (y/N): " confirm
+          if is_yes "$confirm"; then
+            rm -f "$LOCAL_SCRIPT_BAK"
+            ok "管理脚本备份已清理。"
+          else
+            echo "已取消。"
+          fi
+        else
+          echo "未找到管理脚本备份。"
+        fi
+        pause_menu
+        ;;
       0) return ;;
       *) echo "无效选项。"; pause_menu ;;
     esac
@@ -1937,7 +1957,7 @@ show_menu() {
   printf "  %-3s %s\n" "6." "检查喵速更新"
   printf "  %-3s %s\n" "7." "更新管理脚本"
   printf "  %-3s %s\n" "8." "自动维护设置"
-  printf "  %-3s %s\n" "9." "配置备份与清理"
+  printf "  %-3s %s\n" "9." "备份与清理"
   printf "  %-3s %s\n" "10." "卸载"
   printf "  %-3s %s\n" "0." "退出"
   echo "--------------------------------------------------"
