@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260902.2"
+SCRIPT_VERSION="20260903.1"
 RUNTIME_TEMPLATE_VERSION="20260902.1"
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
@@ -146,7 +146,7 @@ view_logs_menu() {
 confirm_purge() {
   local confirm=""
   warn "彻底清除将删除程序、配置、BotID 备注、备份、日志和本地管理脚本。"
-  read -r -p "确认继续彻底清除吗? (y/N): " confirm
+  read -r -p "继续彻底清除 (y/N): " confirm
   is_yes "$confirm" || return 1
   confirm=""
   read -r -p "请输入 DELETE 进行二次确认: " confirm
@@ -158,7 +158,7 @@ uninstall_menu_action() {
   if [ "$mode" = "purge" ]; then
     confirm_purge && return 113
   else
-    read -r -p "确认卸载喵速程序并保留配置、备注和备份吗? (y/N): " confirm
+    read -r -p "卸载喵速程序并保留配置、备注和备份 (y/N): " confirm
     is_yes "$confirm" && return 112
   fi
   echo "已取消。"
@@ -179,7 +179,7 @@ install_interrupt_handler() {
   echo
   warn "安装流程已中断。"
   echo "当前可能已创建本地脚本、快捷入口或临时目录。"
-  read -r -p "是否清理本次安装产生的文件? (y/N): " confirm
+  read -r -p "清理本次安装产生的文件 (y/N): " confirm
   if is_yes "$confirm"; then
     if cleanup_interrupted_install; then
       ok "已清理本次安装产生的文件。"
@@ -1920,7 +1920,7 @@ add_botid_menu() {
     [ -n "$id" ] || continue
     if botid_exists "$id"; then
       existed=1
-      read -r -p "BotID ${id} 已存在，是否更新备注? (y/N): " input
+      read -r -p "BotID ${id} 已存在，更新备注 (y/N): " input
       if is_yes "$input"; then
         read -r -p "备注 ${id}（留空清除备注）: " note
         set_botid_note "$id" "$note"
@@ -2036,7 +2036,7 @@ clear_whitelist_menu() {
     return 0
   fi
 
-  read -r -p "确认清空 BotID 白名单并允许所有吗? (y/N): " confirm
+  read -r -p "清空 BotID 白名单并允许所有 (y/N): " confirm
   if ! is_yes "$confirm"; then
     cleanup_botid_notes_snapshot "$old_notes"
     trap menu_child_interrupt_handler INT TERM
@@ -2045,8 +2045,8 @@ clear_whitelist_menu() {
   fi
 
   WHITELIST=""
-  read -r -p "是否同时清空 BotID 备注? (Y/n 默认: Y): " confirm
-  if [ -z "$confirm" ] || is_yes "$confirm"; then
+  read -r -p "同时清空 BotID 备注 (y/N): " confirm
+  if is_yes "$confirm"; then
     clear_botid_notes
   fi
   trap menu_child_interrupt_handler INT TERM
@@ -2087,9 +2087,18 @@ edit_access_control() {
 }
 
 prompt_yes_no_setting() {
-  local variable="$1" label="$2" input current
+  local variable="$1" label="$2" show_current="${3:-y}" input current options
   current=$(yes_no_text "${!variable}")
-  read -r -p "${label} [当前 ${current}] (y/n，回车保持): " input
+  if is_yes "${!variable}"; then
+    options="Y/n"
+  else
+    options="y/N"
+  fi
+  if is_yes "$show_current"; then
+    read -r -p "${label} [当前 ${current}] (${options}): " input
+  else
+    read -r -p "${label} (${options}): " input
+  fi
   [ -z "$input" ] && return 0
   if is_yes "$input"; then
     printf -v "$variable" 'y'
@@ -2202,7 +2211,7 @@ edit_runtime_params() {
     OUTBOUND_INTERFACE="$input"
   fi
 
-  read -r -p "是否修改高级网络、TLS 与诊断参数? (y/N): " input
+  read -r -p "修改高级网络、TLS 与诊断参数 (y/N): " input
   if is_yes "$input"; then
     prompt_advanced_runtime_params || { pause_menu; return; }
   elif [ -n "$input" ] && ! is_no "$input"; then
@@ -2344,13 +2353,13 @@ core_update_menu() {
           pause_menu
           continue
         fi
-        read -r -p "确认更新到最新版 ${latest_version} 并解除版本锁定? (y/N): " confirm
+        read -r -p "更新到最新版 ${latest_version} 并解除版本锁定 (y/N): " confirm
         if is_yes "$confirm"; then
           load_config
           CORE_UPDATE_POLICY="latest"
           CORE_VERSION="$(normalize_core_version "$latest_version")"
           if install_core_version "$latest_version"; then
-            read -r -p "是否恢复每日 04:00 喵速自动更新? (y/N): " confirm
+            read -r -p "恢复每日 04:00 喵速自动更新 (y/N): " confirm
             is_yes "$confirm" && enable_core_auto_update >/dev/null 2>&1
           fi
         else
@@ -2371,7 +2380,7 @@ core_update_menu() {
           pause_menu
           continue
         }
-        read -r -p "是否安装后锁定该版本并关闭喵速自动更新? (Y/n 默认: Y): " confirm
+        read -r -p "安装后锁定该版本并关闭喵速自动更新 (Y/n): " confirm
         load_config
         lock_after_install=0
         if [ -z "$confirm" ] || is_yes "$confirm"; then
@@ -2390,7 +2399,7 @@ core_update_menu() {
       5)
         load_config
         if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
-          read -r -p "当前已锁定 ${CORE_VERSION:-unknown}，是否解除锁定? (y/N): " confirm
+          read -r -p "解除当前版本锁定 ${CORE_VERSION:-unknown} (y/N): " confirm
           if is_yes "$confirm"; then
             CORE_UPDATE_POLICY="latest"
             current=$(current_core_version)
@@ -2400,7 +2409,7 @@ core_update_menu() {
             write_config
             create_update_script
             ok "已解除版本锁定。"
-            read -r -p "是否恢复每日 04:00 喵速自动更新? (y/N): " confirm
+            read -r -p "恢复每日 04:00 喵速自动更新 (y/N): " confirm
             is_yes "$confirm" && enable_core_auto_update >/dev/null 2>&1
           fi
         else
@@ -2410,7 +2419,7 @@ core_update_menu() {
             pause_menu
             continue
           fi
-          read -r -p "是否锁定当前喵速版本 ${current}? 锁定后会关闭喵速自动更新。 (y/N): " confirm
+          read -r -p "锁定当前喵速版本 ${current} 并关闭喵速自动更新 (y/N): " confirm
           if is_yes "$confirm"; then
             CORE_VERSION="$(normalize_core_version "$current")"
             CORE_UPDATE_POLICY="pinned"
@@ -2494,7 +2503,7 @@ script_update_menu() {
   fi
   echo "远端地址: ${SCRIPT_REMOTE_URL}"
   echo
-  read -r -p "是否现在更新管理脚本? (y/N): " confirm
+  read -r -p "立即更新管理脚本 (y/N): " confirm
   if is_yes "$confirm"; then
     self_update "reload-menu"
     return $?
@@ -2507,13 +2516,13 @@ script_update_menu() {
 toggle_geoip() {
   load_config
   if is_yes "$USE_MMDB"; then
-    read -r -p "当前已启用 GEOIP，是否关闭? (y/N): " confirm
+    read -r -p "关闭 GEOIP 数据库 (y/N): " confirm
     if is_yes "$confirm"; then
       USE_MMDB="n"
       apply_config_and_restart
     fi
   else
-    read -r -p "当前未启用 GEOIP，是否下载并启用? (y/N): " confirm
+    read -r -p "下载并启用 GEOIP 数据库 (y/N): " confirm
     if is_yes "$confirm"; then
       if download_mmdb; then
         USE_MMDB="y"
@@ -2620,7 +2629,7 @@ backup_cleanup_menu() {
         else
           echo "将恢复最近配置备份:"
           echo "$latest"
-          read -r -p "确认恢复并重启服务吗? (y/N): " confirm
+          read -r -p "恢复最近配置备份并重启服务 (y/N): " confirm
           if is_yes "$confirm"; then
             restore_latest_config_backup "$latest"
           else
@@ -2635,7 +2644,7 @@ backup_cleanup_menu() {
         pause_menu
         ;;
       4)
-        read -r -p "确认清理所有配置备份文件吗? (y/N): " confirm
+        read -r -p "清理所有配置备份文件 (y/N): " confirm
         if is_yes "$confirm"; then
           find "$BACKUP_DIR" -type f \( -name "miaospeed.conf_*_bak" -o -name "miaospeed.conf_*_bak.botid_notes" \) -exec rm -f {} \; 2>/dev/null
           ok "所有配置备份文件已清理。"
@@ -2646,7 +2655,7 @@ backup_cleanup_menu() {
         ;;
       5)
         if [ -f "$LOCAL_SCRIPT_BAK" ]; then
-          read -r -p "确认删除管理脚本备份 ${LOCAL_SCRIPT_BAK} 吗? (y/N): " confirm
+          read -r -p "删除管理脚本备份 ${LOCAL_SCRIPT_BAK} (y/N): " confirm
           if is_yes "$confirm"; then
             rm -f "$LOCAL_SCRIPT_BAK"
             ok "管理脚本备份已清理。"
@@ -2788,17 +2797,17 @@ main_menu() {
 
 prompt_maintenance_settings() {
   echo -e "\n${C_B}=== 阶段四: 自动维护 ===${C_0}"
-  prompt_yes_no_setting USE_MMDB "下载并启用 GEOIP 数据库" || exit 1
+  prompt_yes_no_setting USE_MMDB "下载并启用 GEOIP 数据库" n || exit 1
 
   if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
     warn "当前已锁定喵速版本，已跳过喵速自动更新设置。"
     ENABLE_CORE_AUTO_UPDATE="n"
   else
-    prompt_yes_no_setting ENABLE_CORE_AUTO_UPDATE "启用每日 04:00 喵速自动更新" || exit 1
+    prompt_yes_no_setting ENABLE_CORE_AUTO_UPDATE "启用每日 04:00 喵速自动更新" n || exit 1
   fi
 
-  prompt_yes_no_setting ENABLE_SCRIPT_AUTO_UPDATE "启用每日 03:30 管理脚本自动更新" || exit 1
-  prompt_yes_no_setting ENABLE_RESTART "启用每日 04:30 喵速定时重启" || exit 1
+  prompt_yes_no_setting ENABLE_SCRIPT_AUTO_UPDATE "启用每日 03:30 管理脚本自动更新" n || exit 1
+  prompt_yes_no_setting ENABLE_RESTART "启用每日 04:30 喵速定时重启" n || exit 1
 }
 
 prompt_initial_config() {
@@ -2816,7 +2825,7 @@ prompt_initial_config() {
   else
     CORE_VERSION="$(normalize_core_version "$input")"
     validate_core_version "$CORE_VERSION" || { err "版本号包含非法字符。"; exit 1; }
-    read -r -p "是否锁定该版本并关闭喵速自动更新? (Y/n 默认: Y): " input
+    read -r -p "锁定该版本并关闭喵速自动更新 (Y/n): " input
     if [ -z "$input" ] || is_yes "$input"; then
       CORE_UPDATE_POLICY="pinned"
     else
@@ -2872,7 +2881,7 @@ prompt_initial_config() {
   fi
 
   echo -e "\n${C_Y}=== 阶段三: 运行与测试参数 ===${C_0}"
-  read -r -p "是否手工配置运行与测试参数? (y/N 默认: N): " input
+  read -r -p "手工配置运行与测试参数 (y/N): " input
   CONNTHREAD="$DEFAULT_CONN"
   TASKLIMIT=150
   SPEEDLIMIT=0
@@ -2907,10 +2916,10 @@ prompt_initial_config() {
     PAUSESECOND="${input:-0}"
     validate_uint "$PAUSESECOND" || { err "任务间隔必须是非负整数。"; exit 1; }
 
-    prompt_yes_no_setting ENABLE_IPV6 "启用 IPv6 节点测试" || exit 1
-    prompt_yes_no_setting ENABLE_UPLOAD "启用上传测速" || exit 1
-    prompt_yes_no_setting ENABLE_DOWNLOAD_SPEED "启用下载测速" || exit 1
-    prompt_yes_no_setting VERBOSE_LOG "启用详细日志" || exit 1
+    prompt_yes_no_setting ENABLE_IPV6 "启用 IPv6 节点测试" n || exit 1
+    prompt_yes_no_setting ENABLE_UPLOAD "启用上传测速" n || exit 1
+    prompt_yes_no_setting ENABLE_DOWNLOAD_SPEED "启用下载测速" n || exit 1
+    prompt_yes_no_setting VERBOSE_LOG "启用详细日志" n || exit 1
 
     read -r -p "出站网络接口（留空自动选择）: " input
     if [ -n "$input" ]; then
@@ -2919,7 +2928,7 @@ prompt_initial_config() {
       OUTBOUND_INTERFACE="$input"
     fi
 
-    read -r -p "是否配置高级网络、TLS 与诊断参数? (y/N): " input
+    read -r -p "配置高级网络、TLS 与诊断参数 (y/N): " input
     if is_yes "$input"; then
       prompt_advanced_runtime_params || exit 1
     elif [ -n "$input" ] && ! is_no "$input"; then
@@ -2942,7 +2951,7 @@ prepare_install_config() {
     HAD_CONFIG_BEFORE_INSTALL=1
     echo
     warn "检测到保留的配置文件: ${CONF_FILE}"
-    read -r -p "是否复用该配置重新安装? (Y/n 默认: Y): " input
+    read -r -p "复用该配置重新安装 (Y/n): " input
     if [ -z "$input" ] || is_yes "$input"; then
       load_config
       if [ "$CORE_UPDATE_POLICY" != "pinned" ] \
@@ -3207,7 +3216,7 @@ ensure_installed_or_offer() {
     return 0
   fi
   warn "未检测到完整安装。"
-  read -r -p "是否现在开始安装? (y/N): " confirm
+  read -r -p "立即开始安装 (y/N): " confirm
   if is_yes "$confirm"; then
     install_flow
     exit 0
