@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260903.1"
+SCRIPT_VERSION="20260903.2"
 RUNTIME_TEMPLATE_VERSION="20260902.1"
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
@@ -120,9 +120,9 @@ show_status_config_menu() {
     echo
     input=""
     if is_yes "$show_sensitive"; then
-      read -r -p "输入 H 隐藏路径与 Token（便于截图），直接回车返回: " input || return 0
+      read -r -p "输入 H 隐藏关键信息，直接回车返回: " input || return 0
     else
-      read -r -p "输入 S 显示完整参数，直接回车返回: " input || return 0
+      read -r -p "输入 S 显示关键信息，直接回车返回: " input || return 0
     fi
 
     case "$input" in
@@ -500,14 +500,22 @@ cleanup_botid_notes_snapshot() {
 }
 
 print_botid_whitelist_table() {
-  local id note index=1 _whitelist_items
+  local show_sensitive="${1:-y}" id note index=1 count=0 _whitelist_items
   if [ -z "${WHITELIST:-}" ]; then
     echo "  BotID 白名单       : 允许所有"
     return 0
   fi
 
-  echo "  BotID 白名单:"
   IFS=',' read -r -a _whitelist_items <<< "$WHITELIST"
+  if ! is_yes "$show_sensitive"; then
+    for id in "${_whitelist_items[@]}"; do
+      [ -n "$id" ] && count=$((count + 1))
+    done
+    echo "  BotID 白名单       : 已配置（${count} 个，详情已隐藏）"
+    return 0
+  fi
+
+  echo "  BotID 白名单:"
   for id in "${_whitelist_items[@]}"; do
     [ -n "$id" ] || continue
     note=$(get_botid_note "$id")
@@ -1676,6 +1684,11 @@ configured_path_text() {
   [ -n "${1:-}" ] && printf '%s' "$1" || printf '未配置'
 }
 
+redacted_config_text() {
+  local value="${1:-}" detail="${2:-详情}"
+  [ -n "$value" ] && printf '已配置（%s已隐藏）' "$detail" || printf '未配置'
+}
+
 service_status_short() {
   if is_service_alive; then
     printf '%b' "${C_G}运行中${C_0}"
@@ -1781,18 +1794,19 @@ show_status_config() {
 
   echo
   echo "---------------- 连接参数 ----------------"
-  print_kv "监听端口" "$PORT"
   if is_yes "$show_sensitive"; then
+    print_kv "监听端口" "$PORT"
     print_kv "WebSocket 路径" "$PATH_WS"
     print_kv "连接 Token" "$TOKEN"
   else
+    print_kv "监听端口" "[已隐藏]"
     print_kv "WebSocket 路径" "[已隐藏]"
     print_kv "连接 Token" "[已隐藏]"
   fi
 
   echo
   echo "---------------- 访问控制 ----------------"
-  print_botid_whitelist_table
+  print_botid_whitelist_table "$show_sensitive"
 
   echo
   echo "---------------- 运行与测试参数 ----------------"
@@ -1803,17 +1817,30 @@ show_status_config() {
   print_kv "IPv6 节点测试" "$(yes_no_text "$ENABLE_IPV6")"
   print_kv "上传测速" "$(yes_no_text "$ENABLE_UPLOAD")"
   print_kv "下载测速" "$(yes_no_text "$ENABLE_DOWNLOAD_SPEED")"
-  print_kv "出站接口" "${OUTBOUND_INTERFACE:-自动选择}"
+  if is_yes "$show_sensitive" || [ -z "$OUTBOUND_INTERFACE" ]; then
+    print_kv "出站接口" "${OUTBOUND_INTERFACE:-自动选择}"
+  else
+    print_kv "出站接口" "已指定（名称已隐藏）"
+  fi
   print_kv "详细日志" "$(yes_no_text "$VERBOSE_LOG")"
 
   echo
   echo "---------------- 高级网络、TLS 与诊断 ----------------"
-  print_kv "监听地址" "$(effective_bind_address)"
-  print_kv "入站 IP 白名单" "$ALLOW_IPS"
-  print_kv "客户端 CA" "$(configured_path_text "$CLIENT_CA_FILE")"
-  print_kv "服务端证书" "$(configured_path_text "$SERVER_PUBLIC_KEY_FILE")"
-  print_kv "服务端私钥" "$(configured_path_text "$SERVER_PRIVATE_KEY_FILE")"
-  print_kv "pprof" "$(configured_path_text "$PPROF_ADDRESS")"
+  if is_yes "$show_sensitive"; then
+    print_kv "监听地址" "$(effective_bind_address)"
+    print_kv "入站 IP 白名单" "$ALLOW_IPS"
+    print_kv "客户端 CA" "$(configured_path_text "$CLIENT_CA_FILE")"
+    print_kv "服务端证书" "$(configured_path_text "$SERVER_PUBLIC_KEY_FILE")"
+    print_kv "服务端私钥" "$(configured_path_text "$SERVER_PRIVATE_KEY_FILE")"
+    print_kv "pprof" "$(configured_path_text "$PPROF_ADDRESS")"
+  else
+    print_kv "监听地址" "[已隐藏]"
+    print_kv "入站 IP 白名单" "$(redacted_config_text "$ALLOW_IPS")"
+    print_kv "客户端 CA" "$(redacted_config_text "$CLIENT_CA_FILE" "路径")"
+    print_kv "服务端证书" "$(redacted_config_text "$SERVER_PUBLIC_KEY_FILE" "路径")"
+    print_kv "服务端私钥" "$(redacted_config_text "$SERVER_PRIVATE_KEY_FILE" "路径")"
+    print_kv "pprof" "$(redacted_config_text "$PPROF_ADDRESS" "地址")"
+  fi
 
   echo
   echo "---------------- 自动维护 ----------------"

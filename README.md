@@ -110,7 +110,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/Insta
 
 - 脚本需要 `root` 权限，会安装依赖、创建系统服务并可能修改 `crontab`；运行前建议先审阅[当前脚本源码](InstallMiaoSpeed/miaospeed.sh)。
 - BotID 白名单留空时表示允许所有 BotID 连接。公开部署时请配置访问控制，并同时使用复杂的 WebSocket 路径和 Token。
-- “查看状态配置”默认显示完整的 WebSocket 路径和 Token；可在页面内按 `H` 临时隐藏二者，按 `S` 恢复显示。隐藏只影响当前页面，不会清除终端历史。请妥善保护终端记录、`/opt/miaospeed/miaospeed.conf` 及其备份。
+- “查看状态配置”默认显示完整参数；可在页面内按 `H` 进入截图脱敏模式，隐藏连接端点、Token、BotID 与备注、网络接口、准入范围、证书路径和诊断地址，按 `S` 恢复显示。未配置、自动选择等状态仍会保留。隐藏只影响当前页面，不会清除终端历史。请妥善保护终端记录、`/opt/miaospeed/miaospeed.conf` 及其备份。
 - 管理脚本自更新默认跟随本仓库 `main` 分支；核心程序则从上游 Releases 获取。
 
 ## 部署方式
