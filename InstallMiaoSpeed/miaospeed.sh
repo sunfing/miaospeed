@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260902.1"
+SCRIPT_VERSION="20260902.2"
 RUNTIME_TEMPLATE_VERSION="20260902.1"
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
@@ -111,8 +111,30 @@ run_menu_action() {
 }
 
 show_status_config_menu() {
-  show_status_config
-  pause_menu
+  local show_sensitive="y" input redraw=0
+  while true; do
+    [ "$redraw" -eq 0 ] || clear_screen
+    show_status_config "$show_sensitive"
+    redraw=1
+
+    echo
+    input=""
+    if is_yes "$show_sensitive"; then
+      read -r -p "输入 H 隐藏路径与 Token（便于截图），直接回车返回: " input || return 0
+    else
+      read -r -p "输入 S 显示完整参数，直接回车返回: " input || return 0
+    fi
+
+    case "$input" in
+      "") return 0 ;;
+      h|H) show_sensitive="n" ;;
+      s|S) show_sensitive="y" ;;
+      *)
+        warn "请输入 H、S，或直接回车返回。"
+        read -r -p "按回车继续..." _ || return 0
+        ;;
+    esac
+  done
 }
 
 view_logs_menu() {
@@ -1700,6 +1722,10 @@ print_kv() {
     "出站接口")       echo "  出站接口           : ${value}" ;;
     "详细日志")       echo "  详细日志           : ${value}" ;;
     "入站 IP 白名单") echo "  入站 IP 白名单     : ${value}" ;;
+    "客户端 CA")      echo "  客户端 CA          : ${value}" ;;
+    "服务端证书")     echo "  服务端证书         : ${value}" ;;
+    "服务端私钥")     echo "  服务端私钥         : ${value}" ;;
+    "pprof")          echo "  pprof              : ${value}" ;;
     *)                echo "  ${label}: ${value}" ;;
   esac
 }
@@ -1747,7 +1773,7 @@ service_status_text() {
 }
 
 show_status_config() {
-  local mmdb_text speed_text
+  local show_sensitive="${1:-y}" mmdb_text speed_text
   load_config
   mmdb_text="未启用"
   is_yes "$USE_MMDB" && mmdb_text="已启用"
@@ -1756,8 +1782,13 @@ show_status_config() {
   echo
   echo "---------------- 连接参数 ----------------"
   print_kv "监听端口" "$PORT"
-  print_kv "WebSocket 路径" "已隐藏，可在“修改连接参数”中查看"
-  print_kv "连接 Token" "已隐藏，可在“修改连接参数”中查看"
+  if is_yes "$show_sensitive"; then
+    print_kv "WebSocket 路径" "$PATH_WS"
+    print_kv "连接 Token" "$TOKEN"
+  else
+    print_kv "WebSocket 路径" "[已隐藏]"
+    print_kv "连接 Token" "[已隐藏]"
+  fi
 
   echo
   echo "---------------- 访问控制 ----------------"
@@ -3095,7 +3126,7 @@ show_install_summary() {
   echo
   echo -e " ${C_B}[高级网络、TLS 与诊断]${C_0}"
   echo -e " - 监听地址        : $(effective_bind_address)"
-  echo -e " - 入站 IP 白名单 : ${ALLOW_IPS}"
+  echo -e " - 入站 IP 白名单  : ${ALLOW_IPS}"
   echo -e " - 客户端 CA       : $(configured_path_text "$CLIENT_CA_FILE")"
   echo -e " - 自定义服务证书  : ${tls_text}"
   echo -e " - pprof           : $(configured_path_text "$PPROF_ADDRESS")"
