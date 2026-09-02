@@ -74,7 +74,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/Insta
 | `bash /root/miaospeed.sh --purge` | 二次确认后彻底清除程序、配置和管理脚本 |
 | `bash /root/miaospeed.sh --help` | 查看命令帮助 |
 
-管理控制台采用单层菜单，并按用途进行视觉分组：
+管理控制台按用途进行视觉分组。选择普通功能入口后，主菜单会保留在上方，对应的查看、操作或二级选项会在下方展开；操作完成或取消后会清屏并返回干净的主菜单。退出、卸载和管理脚本更新完成时则按对应流程退出或重新载入：
 
 | 分组 | 菜单入口 |
 | --- | --- |
@@ -83,6 +83,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/Insta
 | 更新与维护 | `9` 检查 MiaoSpeed 更新、`10` 更新管理脚本、`11` 自动维护设置、`12` 备份与清理 |
 | 危险操作 | `13` 卸载程序（保留配置）、`14` 彻底清除程序与配置 |
 | 退出 | `0` 退出 |
+
+访问控制、MiaoSpeed 更新、自动维护和备份清理会先提供二级选项；每次完成一项后直接返回主菜单。
 
 运行与测试参数中的高级设置只有在用户确认后才会展开。自定义服务端证书与私钥必须成对配置；pprof 只允许绑定 `127.0.0.1` 或 `[::1]`。
 

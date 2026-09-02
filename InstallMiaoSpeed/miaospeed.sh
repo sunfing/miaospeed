@@ -8,7 +8,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260903.2"
+SCRIPT_VERSION="20260903.3"
 RUNTIME_TEMPLATE_VERSION="20260902.1"
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
@@ -77,7 +77,12 @@ clear_screen() {
 
 pause_menu() {
   echo
-  read -r -p "按回车返回..." _
+  read -r -p "按回车返回主菜单..." _
+}
+
+show_operation_title() {
+  echo
+  echo "---------------- $1 ----------------"
 }
 
 menu_child_interrupt_handler() {
@@ -105,7 +110,7 @@ run_menu_action() {
       trap - INT TERM
       return 0
       ;;
-    111|112) return "$status" ;;
+    111|112|113) return "$status" ;;
     *) return "$status" ;;
   esac
 }
@@ -113,7 +118,11 @@ run_menu_action() {
 show_status_config_menu() {
   local show_sensitive="y" input redraw=0
   while true; do
-    [ "$redraw" -eq 0 ] || clear_screen
+    if [ "$redraw" -ne 0 ]; then
+      show_menu
+      echo "请输入序号: 1"
+    fi
+    show_operation_title "查看状态配置"
     show_status_config "$show_sensitive"
     redraw=1
 
@@ -138,6 +147,7 @@ show_status_config_menu() {
 }
 
 view_logs_menu() {
+  show_operation_title "查看实时日志"
   view_logs
   trap menu_child_interrupt_handler INT TERM
   pause_menu
@@ -156,8 +166,10 @@ confirm_purge() {
 uninstall_menu_action() {
   local mode="${1:-keep-config}" confirm=""
   if [ "$mode" = "purge" ]; then
+    show_operation_title "彻底清除程序与配置"
     confirm_purge && return 113
   else
+    show_operation_title "卸载程序（保留配置）"
     read -r -p "卸载喵速程序并保留配置、备注和备份 (y/N): " confirm
     is_yes "$confirm" && return 112
   fi
@@ -1885,8 +1897,7 @@ edit_connection_params() {
   load_config
   old_port="$PORT"; old_path="$PATH_WS"; old_token="$TOKEN"
 
-  echo
-  echo "---------------- 修改连接参数 ----------------"
+  show_operation_title "修改连接参数"
   [ -n "$BIND_ADDRESS" ] && warn "当前使用自定义监听地址 ${BIND_ADDRESS}；修改监听端口不会改变该地址。"
   read -r -p "监听端口 [当前 ${PORT}]: " input
   if [ -n "$input" ]; then
@@ -2086,31 +2097,26 @@ clear_whitelist_menu() {
 
 edit_access_control() {
   local choice
-  while true; do
-    clear_screen
-    echo "=================================================="
-    echo "                修改访问控制"
-    echo "=================================================="
-    load_config
-    print_botid_whitelist_table
-    echo "--------------------------------------------------"
-    echo "  1.  添加 BotID"
-    echo "  2.  删除 BotID"
-    echo "  3.  修改备注"
-    echo "  4.  清空白名单"
-    echo "  0.  返回主菜单"
-    echo "=================================================="
-    read -r -p "请输入序号: " choice
+  show_operation_title "修改访问控制"
+  load_config
+  print_botid_whitelist_table
+  echo "--------------------------------------------------"
+  echo "  1.  添加 BotID"
+  echo "  2.  删除 BotID"
+  echo "  3.  修改备注"
+  echo "  4.  清空白名单"
+  echo "  0.  返回主菜单"
+  echo "--------------------------------------------------"
+  read -r -p "请输入序号: " choice
 
-    case "$choice" in
-      1) add_botid_menu; pause_menu ;;
-      2) remove_botid_menu; pause_menu ;;
-      3) edit_botid_note_menu; pause_menu ;;
-      4) clear_whitelist_menu; pause_menu ;;
-      0) return ;;
-      *) echo "无效选项。"; pause_menu ;;
-    esac
-  done
+  case "$choice" in
+    1) add_botid_menu; pause_menu ;;
+    2) remove_botid_menu; pause_menu ;;
+    3) edit_botid_note_menu; pause_menu ;;
+    4) clear_whitelist_menu; pause_menu ;;
+    0) return ;;
+    *) echo "无效选项。"; pause_menu ;;
+  esac
 }
 
 prompt_yes_no_setting() {
@@ -2198,8 +2204,7 @@ edit_runtime_params() {
     SERVER_PUBLIC_KEY_FILE SERVER_PRIVATE_KEY_FILE PPROF_ADDRESS 2>/dev/null)
   speed_gbps=$(bytes_to_gbps "$SPEEDLIMIT")
 
-  echo
-  echo "---------------- 修改运行与测试参数 ----------------"
+  show_operation_title "修改运行与测试参数"
   read -r -p "最大并发数 [当前 ${CONNTHREAD}]: " input
   if [ -n "$input" ]; then
     validate_positive_uint "$input" || { err "最大并发数必须是大于 0 的整数。"; pause_menu; return; }
@@ -2336,132 +2341,127 @@ install_core_version() {
 
 core_update_menu() {
   local choice latest_version input confirm current lock_after_install
-  while true; do
-    clear_screen
-    echo "=================================================="
-    echo "                检查喵速更新"
-    echo "=================================================="
-    load_config
-    print_menu_item "1." "当前版本策略" "$(core_version_status)"
-    print_menu_item "2." "检查最新版" "从 GitHub 获取"
-    print_menu_item "3." "更新到最新版" "解除锁定并更新"
-    print_menu_item "4." "安装指定版本" "可选择锁定"
-    if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
-      print_menu_item "5." "版本锁定" "已锁定 ${CORE_VERSION:-unknown}"
-    else
-      print_menu_item "5." "版本锁定" "未锁定"
-    fi
-    echo "--------------------------------------------------"
-    echo "  0.  返回主菜单"
-    echo "=================================================="
-    read -r -p "请输入序号: " choice
+  show_operation_title "检查喵速更新"
+  load_config
+  print_menu_item "1." "当前版本策略" "$(core_version_status)"
+  print_menu_item "2." "检查最新版" "从 GitHub 获取"
+  print_menu_item "3." "更新到最新版" "解除锁定并更新"
+  print_menu_item "4." "安装指定版本" "可选择锁定"
+  if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+    print_menu_item "5." "版本锁定" "已锁定 ${CORE_VERSION:-unknown}"
+  else
+    print_menu_item "5." "版本锁定" "未锁定"
+  fi
+  echo "--------------------------------------------------"
+  echo "  0.  返回主菜单"
+  echo "--------------------------------------------------"
+  read -r -p "请输入序号: " choice
 
-    case "$choice" in
-      1)
-        echo
-        print_kv "喵速版本" "$(core_version_status)"
+  case "$choice" in
+    1)
+      echo
+      print_kv "喵速版本" "$(core_version_status)"
+      pause_menu
+      ;;
+    2)
+      say "获取喵速最新版本..."
+      latest_version=$(get_latest_core_version || true)
+      if [ -n "$latest_version" ]; then
+        ok "最新版本: ${latest_version}"
+      else
+        err "获取最新版本失败。"
+      fi
+      pause_menu
+      ;;
+    3)
+      say "获取喵速最新版本..."
+      latest_version=$(get_latest_core_version || true)
+      if [ -z "$latest_version" ]; then
+        err "获取最新版本失败。"
         pause_menu
-        ;;
-      2)
-        say "获取喵速最新版本..."
-        latest_version=$(get_latest_core_version || true)
-        if [ -n "$latest_version" ]; then
-          ok "最新版本: ${latest_version}"
-        else
-          err "获取最新版本失败。"
+        return 0
+      fi
+      read -r -p "更新到最新版 ${latest_version} 并解除版本锁定 (y/N): " confirm
+      if is_yes "$confirm"; then
+        load_config
+        CORE_UPDATE_POLICY="latest"
+        CORE_VERSION="$(normalize_core_version "$latest_version")"
+        if install_core_version "$latest_version"; then
+          read -r -p "恢复每日 04:00 喵速自动更新 (y/N): " confirm
+          is_yes "$confirm" && enable_core_auto_update >/dev/null 2>&1
         fi
+      else
+        echo "已取消。"
+      fi
+      pause_menu
+      ;;
+    4)
+      read -r -p "请输入喵速版本号，例如 4.6.8 或 v4.6.8: " input
+      input=$(normalize_core_version "$input")
+      if [ -z "$input" ]; then
+        echo "已取消。"
         pause_menu
-        ;;
-      3)
-        say "获取喵速最新版本..."
-        latest_version=$(get_latest_core_version || true)
-        if [ -z "$latest_version" ]; then
-          err "获取最新版本失败。"
-          pause_menu
-          continue
-        fi
-        read -r -p "更新到最新版 ${latest_version} 并解除版本锁定 (y/N): " confirm
+        return 0
+      fi
+      validate_core_version "$input" || {
+        err "版本号包含非法字符。"
+        pause_menu
+        return 0
+      }
+      read -r -p "安装后锁定该版本并关闭喵速自动更新 (Y/n): " confirm
+      load_config
+      lock_after_install=0
+      if [ -z "$confirm" ] || is_yes "$confirm"; then
+        CORE_UPDATE_POLICY="pinned"
+        lock_after_install=1
+      else
+        CORE_UPDATE_POLICY="latest"
+      fi
+      CORE_VERSION="$input"
+      if install_core_version "$input" && [ "$lock_after_install" -eq 1 ]; then
+        disable_core_auto_update >/dev/null 2>&1 || true
+        ok "喵速自动更新已关闭。"
+      fi
+      pause_menu
+      ;;
+    5)
+      load_config
+      if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+        read -r -p "解除当前版本锁定 ${CORE_VERSION:-unknown} (y/N): " confirm
         if is_yes "$confirm"; then
-          load_config
           CORE_UPDATE_POLICY="latest"
-          CORE_VERSION="$(normalize_core_version "$latest_version")"
-          if install_core_version "$latest_version"; then
-            read -r -p "恢复每日 04:00 喵速自动更新 (y/N): " confirm
-            is_yes "$confirm" && enable_core_auto_update >/dev/null 2>&1
-          fi
-        else
-          echo "已取消。"
-        fi
-        pause_menu
-        ;;
-      4)
-        read -r -p "请输入喵速版本号，例如 4.6.8 或 v4.6.8: " input
-        input=$(normalize_core_version "$input")
-        if [ -z "$input" ]; then
-          echo "已取消。"
-          pause_menu
-          continue
-        fi
-        validate_core_version "$input" || {
-          err "版本号包含非法字符。"
-          pause_menu
-          continue
-        }
-        read -r -p "安装后锁定该版本并关闭喵速自动更新 (Y/n): " confirm
-        load_config
-        lock_after_install=0
-        if [ -z "$confirm" ] || is_yes "$confirm"; then
-          CORE_UPDATE_POLICY="pinned"
-          lock_after_install=1
-        else
-          CORE_UPDATE_POLICY="latest"
-        fi
-        CORE_VERSION="$input"
-        if install_core_version "$input" && [ "$lock_after_install" -eq 1 ]; then
-          disable_core_auto_update >/dev/null 2>&1 || true
-          ok "喵速自动更新已关闭。"
-        fi
-        pause_menu
-        ;;
-      5)
-        load_config
-        if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
-          read -r -p "解除当前版本锁定 ${CORE_VERSION:-unknown} (y/N): " confirm
-          if is_yes "$confirm"; then
-            CORE_UPDATE_POLICY="latest"
-            current=$(current_core_version)
-            if [ "$current" != "unknown" ]; then
-              CORE_VERSION="$(normalize_core_version "$current")"
-            fi
-            write_config
-            create_update_script
-            ok "已解除版本锁定。"
-            read -r -p "恢复每日 04:00 喵速自动更新 (y/N): " confirm
-            is_yes "$confirm" && enable_core_auto_update >/dev/null 2>&1
-          fi
-        else
           current=$(current_core_version)
-          if [ "$current" = "unknown" ]; then
-            err "无法识别当前喵速版本，不能锁定。"
-            pause_menu
-            continue
-          fi
-          read -r -p "锁定当前喵速版本 ${current} 并关闭喵速自动更新 (y/N): " confirm
-          if is_yes "$confirm"; then
+          if [ "$current" != "unknown" ]; then
             CORE_VERSION="$(normalize_core_version "$current")"
-            CORE_UPDATE_POLICY="pinned"
-            disable_core_auto_update >/dev/null 2>&1 || true
-            write_config
-            create_update_script
-            ok "已锁定喵速版本 ${CORE_VERSION:-unknown}，喵速自动更新已关闭。"
           fi
+          write_config
+          create_update_script
+          ok "已解除版本锁定。"
+          read -r -p "恢复每日 04:00 喵速自动更新 (y/N): " confirm
+          is_yes "$confirm" && enable_core_auto_update >/dev/null 2>&1
         fi
-        pause_menu
-        ;;
-      0) return ;;
-      *) echo "无效选项。"; pause_menu ;;
-    esac
-  done
+      else
+        current=$(current_core_version)
+        if [ "$current" = "unknown" ]; then
+          err "无法识别当前喵速版本，不能锁定。"
+          pause_menu
+          return 0
+        fi
+        read -r -p "锁定当前喵速版本 ${current} 并关闭喵速自动更新 (y/N): " confirm
+        if is_yes "$confirm"; then
+          CORE_VERSION="$(normalize_core_version "$current")"
+          CORE_UPDATE_POLICY="pinned"
+          disable_core_auto_update >/dev/null 2>&1 || true
+          write_config
+          create_update_script
+          ok "已锁定喵速版本 ${CORE_VERSION:-unknown}，喵速自动更新已关闭。"
+        fi
+      fi
+      pause_menu
+      ;;
+    0) return ;;
+    *) echo "无效选项。"; pause_menu ;;
+  esac
 }
 
 fetch_remote_script_version() {
@@ -2518,9 +2518,8 @@ self_update() {
 }
 
 script_update_menu() {
-  local remote_version confirm
-  echo
-  echo "---------------- 更新管理脚本 ----------------"
+  local remote_version confirm status
+  show_operation_title "更新管理脚本"
   echo "当前版本: ${SCRIPT_VERSION}"
   remote_version=$(fetch_remote_script_version)
   if [ -n "$remote_version" ]; then
@@ -2533,7 +2532,10 @@ script_update_menu() {
   read -r -p "立即更新管理脚本 (y/N): " confirm
   if is_yes "$confirm"; then
     self_update "reload-menu"
-    return $?
+    status=$?
+    [ "$status" -eq 111 ] && return 111
+    pause_menu
+    return "$status"
   else
     echo "已取消。"
   fi
@@ -2563,145 +2565,142 @@ toggle_geoip() {
 
 auto_maintenance_menu() {
   local choice
-  while true; do
-    clear_screen
-    echo "=================================================="
-    echo "                自动维护设置"
-    echo "=================================================="
-    load_config
-    print_menu_item "1." "GEOIP 数据库" "$(is_yes "$USE_MMDB" && echo 已启用 || echo 未启用)"
-    print_menu_item "2." "喵速自动更新" "$(core_auto_update_status)"
-    print_menu_item "3." "脚本自动更新" "$(script_auto_update_status)"
-    print_menu_item "4." "喵速定时重启" "$(restart_cron_status)"
-    echo "--------------------------------------------------"
-    echo "  0.  返回主菜单"
-    echo "=================================================="
-    read -r -p "请输入序号: " choice
+  show_operation_title "自动维护设置"
+  load_config
+  print_menu_item "1." "GEOIP 数据库" "$(is_yes "$USE_MMDB" && echo 已启用 || echo 未启用)"
+  print_menu_item "2." "喵速自动更新" "$(core_auto_update_status)"
+  print_menu_item "3." "脚本自动更新" "$(script_auto_update_status)"
+  print_menu_item "4." "喵速定时重启" "$(restart_cron_status)"
+  echo "--------------------------------------------------"
+  echo "  0.  返回主菜单"
+  echo "--------------------------------------------------"
+  read -r -p "请输入序号: " choice
 
-    case "$choice" in
-      1)
-        toggle_geoip
-        pause_menu
-        ;;
-      2)
-        load_config
-        if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
-          warn "当前已锁定喵速版本，请先在“检查喵速更新”中解除版本锁定。"
-        elif has_cron_line "$UPDATE_SCRIPT"; then
-          disable_core_auto_update && ok "喵速自动更新已关闭。"
-        else
-          enable_core_auto_update && ok "喵速自动更新已开启，每日 04:00。"
-        fi
-        pause_menu
-        ;;
-      3)
-        if has_cron_line "${LOCAL_SCRIPT} --self-update"; then
-          disable_script_auto_update && ok "脚本自动更新已关闭。"
-        else
-          enable_script_auto_update && ok "脚本自动更新已开启，每日 03:30。"
-        fi
-        pause_menu
-        ;;
-      4)
-        if has_cron_line "/bin/systemctl restart ${SERVICE_NAME}" || has_cron_line "/etc/init.d/${SERVICE_NAME} restart"; then
-          disable_restart_cron && ok "喵速定时重启已关闭。"
-        else
-          enable_restart_cron && ok "喵速定时重启已开启，每日 04:30。"
-        fi
-        pause_menu
-        ;;
-      0) return ;;
-      *) echo "无效选项。"; pause_menu ;;
-    esac
-  done
+  case "$choice" in
+    1)
+      toggle_geoip
+      pause_menu
+      ;;
+    2)
+      load_config
+      if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+        warn "当前已锁定喵速版本，请先在“检查喵速更新”中解除版本锁定。"
+      elif has_cron_line "$UPDATE_SCRIPT"; then
+        disable_core_auto_update && ok "喵速自动更新已关闭。"
+      else
+        enable_core_auto_update && ok "喵速自动更新已开启，每日 04:00。"
+      fi
+      pause_menu
+      ;;
+    3)
+      if has_cron_line "${LOCAL_SCRIPT} --self-update"; then
+        disable_script_auto_update && ok "脚本自动更新已关闭。"
+      else
+        enable_script_auto_update && ok "脚本自动更新已开启，每日 03:30。"
+      fi
+      pause_menu
+      ;;
+    4)
+      if has_cron_line "/bin/systemctl restart ${SERVICE_NAME}" || has_cron_line "/etc/init.d/${SERVICE_NAME} restart"; then
+        disable_restart_cron && ok "喵速定时重启已关闭。"
+      else
+        enable_restart_cron && ok "喵速定时重启已开启，每日 04:30。"
+      fi
+      pause_menu
+      ;;
+    0) return ;;
+    *) echo "无效选项。"; pause_menu ;;
+  esac
 }
 
 backup_cleanup_menu() {
   local choice confirm count latest script_backup_text
-  while true; do
-    clear_screen
-    count=$(find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" ! -name "*.botid_notes" 2>/dev/null | wc -l | awk '{print $1}')
-    latest=$(latest_config_backup)
-    script_backup_text="无"
-    [ -f "$LOCAL_SCRIPT_BAK" ] && script_backup_text="$LOCAL_SCRIPT_BAK"
+  count=$(find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" ! -name "*.botid_notes" 2>/dev/null | wc -l | awk '{print $1}')
+  latest=$(latest_config_backup)
+  script_backup_text="无"
+  [ -f "$LOCAL_SCRIPT_BAK" ] && script_backup_text="$LOCAL_SCRIPT_BAK"
 
-    echo "=================================================="
-    echo "                备份与清理"
-    echo "=================================================="
-    echo "配置备份数量: ${count}"
-    echo "管理脚本备份: ${script_backup_text}"
-    [ -n "${latest:-}" ] && echo "最近配置备份: ${latest}"
-    echo "--------------------------------------------------"
-    echo "  1.  立即备份配置"
-    echo "  2.  恢复最近配置备份"
-    echo "  3.  清理 30 天前配置备份"
-    echo "  4.  清理所有配置备份"
-    echo "  5.  清理管理脚本备份"
-    echo "  0.  返回主菜单"
-    echo "=================================================="
-    read -r -p "请输入序号: " choice
+  show_operation_title "备份与清理"
+  echo "配置备份数量: ${count}"
+  echo "管理脚本备份: ${script_backup_text}"
+  [ -n "${latest:-}" ] && echo "最近配置备份: ${latest}"
+  echo "--------------------------------------------------"
+  echo "  1.  立即备份配置"
+  echo "  2.  恢复最近配置备份"
+  echo "  3.  清理 30 天前配置备份"
+  echo "  4.  清理所有配置备份"
+  echo "  5.  清理管理脚本备份"
+  echo "  0.  返回主菜单"
+  echo "--------------------------------------------------"
+  read -r -p "请输入序号: " choice
 
-    case "$choice" in
-      1)
-        if backup_config; then
-          ok "配置已备份: ${LAST_BACKUP_FILE}"
-        else
-          err "配置备份失败。"
-        fi
-        pause_menu
-        ;;
-      2)
-        if [ -z "${latest:-}" ]; then
-          err "未找到可恢复的配置备份。"
-        else
-          echo "将恢复最近配置备份:"
-          echo "$latest"
-          read -r -p "恢复最近配置备份并重启服务 (y/N): " confirm
-          if is_yes "$confirm"; then
-            restore_latest_config_backup "$latest"
-          else
-            echo "已取消。"
-          fi
-        fi
-        pause_menu
-        ;;
-      3)
-        find "$BACKUP_DIR" -type f \( -name "miaospeed.conf_*_bak" -o -name "miaospeed.conf_*_bak.botid_notes" \) -mtime +30 -exec rm -f {} \; 2>/dev/null
-        ok "已清理 30 天前配置备份。"
-        pause_menu
-        ;;
-      4)
-        read -r -p "清理所有配置备份文件 (y/N): " confirm
+  case "$choice" in
+    1)
+      if backup_config; then
+        ok "配置已备份: ${LAST_BACKUP_FILE}"
+      else
+        err "配置备份失败。"
+      fi
+      pause_menu
+      ;;
+    2)
+      if [ -z "${latest:-}" ]; then
+        err "未找到可恢复的配置备份。"
+      else
+        echo "将恢复最近配置备份:"
+        echo "$latest"
+        read -r -p "恢复最近配置备份并重启服务 (y/N): " confirm
         if is_yes "$confirm"; then
-          find "$BACKUP_DIR" -type f \( -name "miaospeed.conf_*_bak" -o -name "miaospeed.conf_*_bak.botid_notes" \) -exec rm -f {} \; 2>/dev/null
-          ok "所有配置备份文件已清理。"
+          restore_latest_config_backup "$latest"
         else
           echo "已取消。"
         fi
-        pause_menu
-        ;;
-      5)
-        if [ -f "$LOCAL_SCRIPT_BAK" ]; then
-          read -r -p "删除管理脚本备份 ${LOCAL_SCRIPT_BAK} (y/N): " confirm
-          if is_yes "$confirm"; then
-            rm -f "$LOCAL_SCRIPT_BAK"
-            ok "管理脚本备份已清理。"
-          else
-            echo "已取消。"
-          fi
+      fi
+      pause_menu
+      ;;
+    3)
+      find "$BACKUP_DIR" -type f \( -name "miaospeed.conf_*_bak" -o -name "miaospeed.conf_*_bak.botid_notes" \) -mtime +30 -exec rm -f {} \; 2>/dev/null
+      ok "已清理 30 天前配置备份。"
+      pause_menu
+      ;;
+    4)
+      read -r -p "清理所有配置备份文件 (y/N): " confirm
+      if is_yes "$confirm"; then
+        find "$BACKUP_DIR" -type f \( -name "miaospeed.conf_*_bak" -o -name "miaospeed.conf_*_bak.botid_notes" \) -exec rm -f {} \; 2>/dev/null
+        ok "所有配置备份文件已清理。"
+      else
+        echo "已取消。"
+      fi
+      pause_menu
+      ;;
+    5)
+      if [ -f "$LOCAL_SCRIPT_BAK" ]; then
+        read -r -p "删除管理脚本备份 ${LOCAL_SCRIPT_BAK} (y/N): " confirm
+        if is_yes "$confirm"; then
+          rm -f "$LOCAL_SCRIPT_BAK"
+          ok "管理脚本备份已清理。"
         else
-          echo "未找到管理脚本备份。"
+          echo "已取消。"
         fi
-        pause_menu
-        ;;
-      0) return ;;
-      *) echo "无效选项。"; pause_menu ;;
-    esac
-  done
+      else
+        echo "未找到管理脚本备份。"
+      fi
+      pause_menu
+      ;;
+    0) return ;;
+    *) echo "无效选项。"; pause_menu ;;
+  esac
 }
 
 service_control_action() {
-  local action="$1"
+  local action="$1" title
+  case "$action" in
+    start) title="启动服务" ;;
+    stop) title="停止服务" ;;
+    restart) title="重启服务" ;;
+    *) return 1 ;;
+  esac
+  show_operation_title "$title"
   case "$action" in
     start)
       if is_service_alive; then
