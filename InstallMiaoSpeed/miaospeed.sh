@@ -8,7 +8,8 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="20260522.6" # Re9 发布，基于 Re8
+SCRIPT_VERSION="20260902.1"
+RUNTIME_TEMPLATE_VERSION="20260902.1"
 SCRIPT_NAME="miaospeed.sh"
 LOCAL_SCRIPT="/root/${SCRIPT_NAME}"
 LOCAL_SCRIPT_BAK="/root/${SCRIPT_NAME}.bak"
@@ -22,7 +23,8 @@ TMP_DIR="${INSTALL_DIR}/tmp"
 BACKUP_DIR="${INSTALL_DIR}/backup"
 
 CONF_FILE="${INSTALL_DIR}/miaospeed.conf"
-BOTID_NOTES_FILE="${INSTALL_DIR}/botid_notes.tsv"
+DEFAULT_BOTID_NOTES_FILE="${INSTALL_DIR}/botid_notes.tsv"
+BOTID_NOTES_FILE="$DEFAULT_BOTID_NOTES_FILE"
 RUN_SCRIPT="${INSTALL_DIR}/run.sh"
 UPDATE_SCRIPT="${INSTALL_DIR}/update.sh"
 SERVICE_NAME="miaospeed"
@@ -36,14 +38,42 @@ OS_TYPE="linux"
 SERVICE_MODE=1 # 1=systemd, 2=procd
 LAST_BACKUP_FILE=""
 INSTALL_INTERRUPTED=0
+INSTALL_COMPLETED=0
+INSTALL_CLEANUP_DONE=0
+INSTALL_SKIP_AUTO_CLEANUP=0
+INSTALL_ROLLBACK_CONFIG=""
 CORE_VERSION=""
 CORE_UPDATE_POLICY="latest"
+ENABLE_IPV6="n"
+ENABLE_UPLOAD="n"
+ENABLE_DOWNLOAD_SPEED="y"
+OUTBOUND_INTERFACE=""
+VERBOSE_LOG="y"
+BIND_ADDRESS=""
+ALLOW_IPS="0.0.0.0/0"
+CLIENT_CA_FILE=""
+SERVER_PUBLIC_KEY_FILE=""
+SERVER_PRIVATE_KEY_FILE=""
+PPROF_ADDRESS=""
+HAD_CONFIG_BEFORE_INSTALL=0
+LATEST_VERSION_FALLBACK=0
+PENDING_BOTID_NOTES_FILE=""
 
-C_G="\033[1;32m"; C_Y="\033[1;33m"; C_R="\033[1;31m"; C_B="\033[1;34m"; C_0="\033[0m"
+if [ -t 0 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] && [ -z "${NO_COLOR:-}" ]; then
+  C_G="\033[1;32m"; C_Y="\033[1;33m"; C_R="\033[1;31m"; C_B="\033[1;34m"; C_0="\033[0m"
+else
+  C_G=""; C_Y=""; C_R=""; C_B=""; C_0=""
+fi
 say()  { echo -e "${C_B}[*]${C_0} $*"; }
 ok()   { echo -e "${C_G}[OK]${C_0} $*"; }
 warn() { echo -e "${C_Y}[!]${C_0} $*"; }
 err()  { echo -e "${C_R}[X]${C_0} $*"; }
+
+clear_screen() {
+  if [ -t 0 ] && [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] && command_exists clear; then
+    clear
+  fi
+}
 
 pause_menu() {
   echo
@@ -91,11 +121,23 @@ view_logs_menu() {
   pause_menu
 }
 
+confirm_purge() {
+  local confirm=""
+  warn "彻底清除将删除程序、配置、BotID 备注、备份、日志和本地管理脚本。"
+  read -r -p "确认继续彻底清除吗? (y/N): " confirm
+  is_yes "$confirm" || return 1
+  confirm=""
+  read -r -p "请输入 DELETE 进行二次确认: " confirm
+  [ "$confirm" = "DELETE" ]
+}
+
 uninstall_menu_action() {
-  local confirm
-  read -r -p "确认卸载喵速并删除相关文件吗? (y/N): " confirm
-  if is_yes "$confirm"; then
-    return 112
+  local mode="${1:-keep-config}" confirm=""
+  if [ "$mode" = "purge" ]; then
+    confirm_purge && return 113
+  else
+    read -r -p "确认卸载喵速程序并保留配置、备注和备份吗? (y/N): " confirm
+    is_yes "$confirm" && return 112
   fi
   echo "已取消。"
   pause_menu
@@ -117,34 +159,53 @@ install_interrupt_handler() {
   echo "当前可能已创建本地脚本、快捷入口或临时目录。"
   read -r -p "是否清理本次安装产生的文件? (y/N): " confirm
   if is_yes "$confirm"; then
-    cleanup_interrupted_install
-    ok "已清理本次安装产生的文件。"
+    if cleanup_interrupted_install; then
+      ok "已清理本次安装产生的文件。"
+    else
+      err "本次安装文件已清理，但原配置恢复失败，请检查备份: ${INSTALL_ROLLBACK_CONFIG:-无}"
+    fi
   else
+    INSTALL_SKIP_AUTO_CLEANUP=1
     warn "已保留现有文件；可稍后运行 bash ${LOCAL_SCRIPT} --uninstall 清理。"
   fi
   exit 130
 }
 
 cleanup_interrupted_install() {
-  systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
-  systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
-  rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
-  systemctl daemon-reload >/dev/null 2>&1 || true
-
-  if [ -f "/etc/init.d/${SERVICE_NAME}" ]; then
-    /etc/init.d/"$SERVICE_NAME" stop >/dev/null 2>&1 || true
-    /etc/init.d/"$SERVICE_NAME" disable >/dev/null 2>&1 || true
-    rm -f "/etc/init.d/${SERVICE_NAME}"
+  local restore_failed=0
+  [ "$INSTALL_CLEANUP_DONE" -eq 0 ] || return 0
+  discard_pending_botid_notes
+  if [ "$HAD_CONFIG_BEFORE_INSTALL" -eq 1 ]; then
+    uninstall_flow "keep-config" quiet
+    if [ -n "$INSTALL_ROLLBACK_CONFIG" ] && [ -f "$INSTALL_ROLLBACK_CONFIG" ]; then
+      cp "$INSTALL_ROLLBACK_CONFIG" "$CONF_FILE" 2>/dev/null || restore_failed=1
+      chmod 600 "$CONF_FILE" 2>/dev/null || restore_failed=1
+      if [ -f "${INSTALL_ROLLBACK_CONFIG}.botid_notes" ]; then
+        cp "${INSTALL_ROLLBACK_CONFIG}.botid_notes" "$DEFAULT_BOTID_NOTES_FILE" 2>/dev/null || restore_failed=1
+        chmod 600 "$DEFAULT_BOTID_NOTES_FILE" 2>/dev/null || restore_failed=1
+      else
+        rm -f "$DEFAULT_BOTID_NOTES_FILE" || restore_failed=1
+      fi
+    fi
+  else
+    uninstall_flow "purge" quiet
   fi
+  INSTALL_CLEANUP_DONE=1
+  return "$restore_failed"
+}
 
-  disable_core_auto_update >/dev/null 2>&1 || true
-  disable_script_auto_update >/dev/null 2>&1 || true
-  disable_restart_cron >/dev/null 2>&1 || true
-
-  pkill -9 -f "^${INSTALL_DIR}/miaospeed" >/dev/null 2>&1 || true
-  rm -rf "$INSTALL_DIR"
-  rm -f "$LAUNCHER" /usr/local/bin/miao /etc/logrotate.d/miaospeed
-  rm -f "$LOCAL_SCRIPT" "$LOCAL_SCRIPT_BAK"
+install_exit_handler() {
+  local status=$?
+  if [ "$INSTALL_COMPLETED" -eq 0 ] \
+    && [ "$INSTALL_CLEANUP_DONE" -eq 0 ] \
+    && [ "$INSTALL_SKIP_AUTO_CLEANUP" -eq 0 ]; then
+    if cleanup_interrupted_install; then
+      [ "$status" -eq 0 ] || warn "安装未完成，已清理本次变更并恢复安装前状态。"
+    else
+      err "安装未完成且原配置恢复失败，请检查备份: ${INSTALL_ROLLBACK_CONFIG:-无}"
+    fi
+  fi
+  return "$status"
 }
 
 require_root() {
@@ -159,6 +220,28 @@ is_yes() {
     y|Y|yes|YES) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+is_no() {
+  case "${1:-}" in
+    n|N|no|NO) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+yes_no_text() {
+  is_yes "${1:-}" && printf '已开启' || printf '已关闭'
+}
+
+normalize_yes_no() {
+  local value="${1:-}" default_value="${2:-n}"
+  if is_yes "$value"; then
+    printf 'y'
+  elif is_no "$value"; then
+    printf 'n'
+  else
+    printf '%s' "$default_value"
+  fi
 }
 
 command_exists() {
@@ -196,6 +279,60 @@ validate_path() {
 
 validate_token() {
   [[ "${1:-}" =~ ^[A-Za-z0-9._/-]+$ ]]
+}
+
+validate_yes_no() {
+  is_yes "${1:-}" || is_no "${1:-}"
+}
+
+validate_interface_name() {
+  [[ -z "${1:-}" || "${1:-}" =~ ^[A-Za-z0-9_.-]+$ ]]
+}
+
+interface_exists() {
+  local name="${1:-}"
+  [ -z "$name" ] && return 0
+  [ -d "/sys/class/net/${name}" ] && return 0
+  command_exists ip && ip link show dev "$name" >/dev/null 2>&1
+}
+
+validate_bind_address() {
+  local value="${1:-}" port
+  [ -z "$value" ] && return 0
+  if [[ "$value" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    return 0
+  fi
+  if [[ "$value" =~ ^\[([0-9A-Fa-f:]+)\]:([0-9]+)$ ]]; then
+    port="${BASH_REMATCH[2]}"
+  elif [[ "$value" =~ ^([A-Za-z0-9._-]+):([0-9]+)$ ]]; then
+    port="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+  validate_port "$port"
+}
+
+validate_allow_ips() {
+  [[ "${1:-}" =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?(,[0-9A-Fa-f:.]+(/[0-9]{1,3})?)*$ ]]
+}
+
+validate_absolute_file_path() {
+  local value="${1:-}"
+  [ -z "$value" ] && return 0
+  [[ "$value" == /* && "$value" != *\"* && "$value" != *$'\n'* && "$value" != *$'\r'* ]]
+}
+
+validate_pprof_address() {
+  local value="${1:-}" port
+  [ -z "$value" ] && return 0
+  if [[ "$value" =~ ^127\.0\.0\.1:([0-9]+)$ ]]; then
+    port="${BASH_REMATCH[1]}"
+  elif [[ "$value" =~ ^\[::1\]:([0-9]+)$ ]]; then
+    port="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+  validate_port "$port"
 }
 
 validate_core_version() {
@@ -257,6 +394,26 @@ ensure_botid_notes_file() {
   mkdir -p "$INSTALL_DIR"
   [ -f "$BOTID_NOTES_FILE" ] || : > "$BOTID_NOTES_FILE"
   chmod 600 "$BOTID_NOTES_FILE" 2>/dev/null || true
+}
+
+discard_pending_botid_notes() {
+  if [ -n "$PENDING_BOTID_NOTES_FILE" ]; then
+    rm -f "$PENDING_BOTID_NOTES_FILE"
+    PENDING_BOTID_NOTES_FILE=""
+    BOTID_NOTES_FILE="$DEFAULT_BOTID_NOTES_FILE"
+  fi
+}
+
+commit_pending_botid_notes() {
+  [ -n "$PENDING_BOTID_NOTES_FILE" ] || return 0
+  if [ -f "$PENDING_BOTID_NOTES_FILE" ]; then
+    mv -f "$PENDING_BOTID_NOTES_FILE" "$DEFAULT_BOTID_NOTES_FILE" || return 1
+    chmod 600 "$DEFAULT_BOTID_NOTES_FILE" 2>/dev/null || true
+  else
+    rm -f "$DEFAULT_BOTID_NOTES_FILE" || return 1
+  fi
+  PENDING_BOTID_NOTES_FILE=""
+  BOTID_NOTES_FILE="$DEFAULT_BOTID_NOTES_FILE"
 }
 
 get_botid_note() {
@@ -640,6 +797,17 @@ load_config() {
   USE_MMDB=$(get_conf USE_MMDB)
   CORE_VERSION=$(get_conf CORE_VERSION)
   CORE_UPDATE_POLICY=$(get_conf CORE_UPDATE_POLICY)
+  ENABLE_IPV6=$(get_conf ENABLE_IPV6)
+  ENABLE_UPLOAD=$(get_conf ENABLE_UPLOAD)
+  ENABLE_DOWNLOAD_SPEED=$(get_conf ENABLE_DOWNLOAD_SPEED)
+  OUTBOUND_INTERFACE=$(get_conf OUTBOUND_INTERFACE)
+  VERBOSE_LOG=$(get_conf VERBOSE_LOG)
+  BIND_ADDRESS=$(get_conf BIND_ADDRESS)
+  ALLOW_IPS=$(get_conf ALLOW_IPS)
+  CLIENT_CA_FILE=$(get_conf CLIENT_CA_FILE)
+  SERVER_PUBLIC_KEY_FILE=$(get_conf SERVER_PUBLIC_KEY_FILE)
+  SERVER_PRIVATE_KEY_FILE=$(get_conf SERVER_PRIVATE_KEY_FILE)
+  PPROF_ADDRESS=$(get_conf PPROF_ADDRESS)
 
   PORT="${PORT:-}"
   PATH_WS="${PATH_WS:-}"
@@ -651,6 +819,17 @@ load_config() {
   PAUSESECOND="${PAUSESECOND:-0}"
   USE_MMDB="${USE_MMDB:-n}"
   CORE_VERSION="$(normalize_core_version "${CORE_VERSION:-}")"
+  ENABLE_IPV6=$(normalize_yes_no "$ENABLE_IPV6" n)
+  ENABLE_UPLOAD=$(normalize_yes_no "$ENABLE_UPLOAD" n)
+  ENABLE_DOWNLOAD_SPEED=$(normalize_yes_no "$ENABLE_DOWNLOAD_SPEED" y)
+  OUTBOUND_INTERFACE="${OUTBOUND_INTERFACE:-}"
+  VERBOSE_LOG=$(normalize_yes_no "$VERBOSE_LOG" y)
+  BIND_ADDRESS="${BIND_ADDRESS:-}"
+  ALLOW_IPS="${ALLOW_IPS:-0.0.0.0/0}"
+  CLIENT_CA_FILE="${CLIENT_CA_FILE:-}"
+  SERVER_PUBLIC_KEY_FILE="${SERVER_PUBLIC_KEY_FILE:-}"
+  SERVER_PRIVATE_KEY_FILE="${SERVER_PRIVATE_KEY_FILE:-}"
+  PPROF_ADDRESS="${PPROF_ADDRESS:-}"
   case "${CORE_UPDATE_POLICY:-latest}" in
     pinned) CORE_UPDATE_POLICY="pinned" ;;
     *) CORE_UPDATE_POLICY="latest" ;;
@@ -658,7 +837,8 @@ load_config() {
 }
 
 write_config() {
-  cat > "$CONF_FILE" <<EOF
+  local tmp_conf="${CONF_FILE}.tmp.$$"
+  if ! cat > "$tmp_conf" <<EOF
 PORT="${PORT}"
 PATH_WS="${PATH_WS}"
 TOKEN="${TOKEN}"
@@ -670,8 +850,98 @@ PAUSESECOND="${PAUSESECOND}"
 USE_MMDB="${USE_MMDB}"
 CORE_VERSION="${CORE_VERSION}"
 CORE_UPDATE_POLICY="${CORE_UPDATE_POLICY}"
+ENABLE_IPV6="${ENABLE_IPV6}"
+ENABLE_UPLOAD="${ENABLE_UPLOAD}"
+ENABLE_DOWNLOAD_SPEED="${ENABLE_DOWNLOAD_SPEED}"
+OUTBOUND_INTERFACE="${OUTBOUND_INTERFACE}"
+VERBOSE_LOG="${VERBOSE_LOG}"
+BIND_ADDRESS="${BIND_ADDRESS}"
+ALLOW_IPS="${ALLOW_IPS}"
+CLIENT_CA_FILE="${CLIENT_CA_FILE}"
+SERVER_PUBLIC_KEY_FILE="${SERVER_PUBLIC_KEY_FILE}"
+SERVER_PRIVATE_KEY_FILE="${SERVER_PRIVATE_KEY_FILE}"
+PPROF_ADDRESS="${PPROF_ADDRESS}"
 EOF
-  chmod 600 "$CONF_FILE"
+  then
+    rm -f "$tmp_conf"
+    return 1
+  fi
+  if chmod 600 "$tmp_conf" && mv -f "$tmp_conf" "$CONF_FILE"; then
+    return 0
+  fi
+  rm -f "$tmp_conf"
+  return 1
+}
+
+validate_runtime_configuration() {
+  validate_port "$PORT" || { err "监听端口必须是 1-65535 之间的数字。"; return 1; }
+  validate_path "$PATH_WS" || { err "WebSocket 路径包含非法字符。"; return 1; }
+  validate_token "$TOKEN" || { err "连接 Token 包含非法字符。"; return 1; }
+  validate_botid "$WHITELIST" || { err "BotID 白名单格式无效。"; return 1; }
+  validate_positive_uint "$CONNTHREAD" || { err "最大并发数必须是大于 0 的整数。"; return 1; }
+  validate_positive_uint "$TASKLIMIT" || { err "任务队列上限必须是大于 0 的整数。"; return 1; }
+  validate_uint "$SPEEDLIMIT" || { err "测速限速必须是非负整数。"; return 1; }
+  validate_uint "$PAUSESECOND" || { err "任务间隔必须是非负整数。"; return 1; }
+  validate_yes_no "$ENABLE_IPV6" || { err "IPv6 节点测试开关无效。"; return 1; }
+  validate_yes_no "$ENABLE_UPLOAD" || { err "上传测速开关无效。"; return 1; }
+  validate_yes_no "$ENABLE_DOWNLOAD_SPEED" || { err "下载测速开关无效。"; return 1; }
+  validate_yes_no "$VERBOSE_LOG" || { err "详细日志开关无效。"; return 1; }
+  validate_interface_name "$OUTBOUND_INTERFACE" || { err "出站接口名称包含非法字符。"; return 1; }
+  interface_exists "$OUTBOUND_INTERFACE" || { err "未找到出站接口 ${OUTBOUND_INTERFACE}。"; return 1; }
+  validate_bind_address "$BIND_ADDRESS" || { err "监听地址格式无效，请使用 IP:端口、[IPv6]:端口或 Unix Socket 路径。"; return 1; }
+  validate_allow_ips "$ALLOW_IPS" || { err "入站 IP/CIDR 白名单格式无效。"; return 1; }
+  validate_absolute_file_path "$CLIENT_CA_FILE" || { err "客户端 CA 必须使用不含双引号或换行的绝对路径。"; return 1; }
+  validate_absolute_file_path "$SERVER_PUBLIC_KEY_FILE" || { err "服务端证书必须使用不含双引号或换行的绝对路径。"; return 1; }
+  validate_absolute_file_path "$SERVER_PRIVATE_KEY_FILE" || { err "服务端私钥必须使用不含双引号或换行的绝对路径。"; return 1; }
+  validate_pprof_address "$PPROF_ADDRESS" || { err "pprof 仅允许监听 127.0.0.1:端口或 [::1]:端口。"; return 1; }
+
+  if { [ -n "$SERVER_PUBLIC_KEY_FILE" ] && [ -z "$SERVER_PRIVATE_KEY_FILE" ]; } \
+    || { [ -z "$SERVER_PUBLIC_KEY_FILE" ] && [ -n "$SERVER_PRIVATE_KEY_FILE" ]; }; then
+    err "自定义服务端证书和私钥必须同时配置。"
+    return 1
+  fi
+
+  local file label
+  for label in "客户端 CA" "服务端证书" "服务端私钥"; do
+    case "$label" in
+      "客户端 CA") file="$CLIENT_CA_FILE" ;;
+      "服务端证书") file="$SERVER_PUBLIC_KEY_FILE" ;;
+      *) file="$SERVER_PRIVATE_KEY_FILE" ;;
+    esac
+    if [ -n "$file" ] && [ ! -r "$file" ]; then
+      err "${label}文件不存在或不可读: ${file}"
+      return 1
+    fi
+  done
+}
+
+core_supports_flag() {
+  local binary="$1" flag="$2" help_text
+  help_text=$("$binary" server -help 2>&1 || true)
+  printf '%s\n' "$help_text" | grep -Eq -- "(^|[[:space:]])${flag}([[:space:]]|$)"
+}
+
+validate_core_flag_support() {
+  local binary="$1" flag label
+  [ -x "$binary" ] || return 0
+
+  while IFS='|' read -r flag label; do
+    [ -n "$flag" ] || continue
+    if ! core_supports_flag "$binary" "$flag"; then
+      err "当前喵速核心不支持 ${flag}（${label}），请升级核心或关闭该选项。"
+      return 1
+    fi
+  done <<EOF
+$(is_yes "$ENABLE_IPV6" && echo '-ipv6|IPv6 节点测试')
+$(is_yes "$ENABLE_UPLOAD" && echo '-upload|上传测速')
+$(is_no "$ENABLE_DOWNLOAD_SPEED" && echo '-nospeed|关闭下载测速')
+$([ -n "$OUTBOUND_INTERFACE" ] && echo '-interface|出站接口')
+$(is_yes "$VERBOSE_LOG" && echo '-verbose|详细日志')
+$([ -n "$CLIENT_CA_FILE" ] && echo '-clientca|客户端证书验证')
+$([ -n "$SERVER_PUBLIC_KEY_FILE" ] && echo '-serverpublickey|自定义服务端证书')
+$([ -n "$SERVER_PRIVATE_KEY_FILE" ] && echo '-serverprivatekey|自定义服务端私钥')
+$([ -n "$PPROF_ADDRESS" ] && echo '-pprof|pprof 诊断')
+EOF
 }
 
 backup_config() {
@@ -688,7 +958,7 @@ latest_config_backup() {
 }
 
 restore_latest_config_backup() {
-  local latest="$1"
+  local latest="$1" current_backup run_backup="" had_run=0
   if [ -z "$latest" ] || [ ! -f "$latest" ]; then
     err "未找到可恢复的配置备份。"
     return 1
@@ -699,9 +969,26 @@ restore_latest_config_backup() {
       err "恢复前备份当前配置失败，已取消恢复。"
       return 1
     }
+    current_backup="$LAST_BACKUP_FILE"
+  else
+    current_backup=""
+  fi
+
+  if [ -f "$RUN_SCRIPT" ]; then
+    run_backup=$(mktemp "${TMP_DIR}/run.sh.restore.XXXXXX") || {
+      err "恢复前备份运行脚本失败，已取消恢复。"
+      return 1
+    }
+    cp -p "$RUN_SCRIPT" "$run_backup" || {
+      rm -f "$run_backup"
+      err "恢复前备份运行脚本失败，已取消恢复。"
+      return 1
+    }
+    had_run=1
   fi
 
   cp "$latest" "$CONF_FILE" || {
+    [ -n "$run_backup" ] && rm -f "$run_backup"
     err "恢复配置失败。"
     return 1
   }
@@ -709,15 +996,44 @@ restore_latest_config_backup() {
   if [ -f "${latest}.botid_notes" ]; then
     cp "${latest}.botid_notes" "$BOTID_NOTES_FILE" || true
     chmod 600 "$BOTID_NOTES_FILE" 2>/dev/null || true
+  else
+    rm -f "$BOTID_NOTES_FILE"
   fi
 
   say "配置已恢复，正在重启服务..."
-  if restart_service; then
+  load_config
+  if validate_runtime_configuration \
+    && validate_core_flag_support "${INSTALL_DIR}/miaospeed" \
+    && create_run_script \
+    && restart_service_checked; then
+    [ -n "$run_backup" ] && rm -f "$run_backup"
     ok "配置已恢复并重启服务。"
-  else
-    err "配置已恢复，但服务重启失败，请查看日志。"
-    return 1
+    return 0
   fi
+
+  warn "备份配置未能正常启动，正在恢复操作前的配置。"
+  if [ -n "$current_backup" ]; then
+    cp "$current_backup" "$CONF_FILE" 2>/dev/null || true
+    chmod 600 "$CONF_FILE" 2>/dev/null || true
+    if [ -f "${current_backup}.botid_notes" ]; then
+      cp "${current_backup}.botid_notes" "$BOTID_NOTES_FILE" 2>/dev/null || true
+      chmod 600 "$BOTID_NOTES_FILE" 2>/dev/null || true
+    else
+      rm -f "$BOTID_NOTES_FILE"
+    fi
+  fi
+  if [ "$had_run" -eq 1 ]; then
+    cp -p "$run_backup" "$RUN_SCRIPT" 2>/dev/null || true
+  else
+    rm -f "$RUN_SCRIPT"
+  fi
+  [ -n "$run_backup" ] && rm -f "$run_backup"
+  if restart_service_checked; then
+    ok "已恢复操作前的配置，服务运行正常。"
+  else
+    err "配置已回滚，但服务仍未正常运行，请查看日志。"
+  fi
+  return 1
 }
 
 current_service_mode() {
@@ -771,28 +1087,89 @@ is_service_alive() {
   fi
 }
 
+wait_for_service_alive() {
+  local attempts="${1:-6}" stable_checks=0
+  while [ "$attempts" -gt 0 ]; do
+    sleep 1
+    if is_service_alive; then
+      stable_checks=$((stable_checks + 1))
+      [ "$stable_checks" -ge 3 ] && return 0
+    else
+      stable_checks=0
+    fi
+    attempts=$((attempts - 1))
+  done
+  return 1
+}
+
+wait_for_service_stopped() {
+  local attempts="${1:-5}"
+  while [ "$attempts" -gt 0 ]; do
+    is_service_alive || return 0
+    attempts=$((attempts - 1))
+    [ "$attempts" -gt 0 ] && sleep 1
+  done
+  return 1
+}
+
+restart_service_checked() {
+  restart_service >/dev/null 2>&1 || return 1
+  wait_for_service_alive 6
+}
+
 apply_config_and_restart() {
+  local run_backup="" had_run=0
+  validate_runtime_configuration || return 1
+  validate_core_flag_support "${INSTALL_DIR}/miaospeed" || return 1
+
   if ! backup_config; then
     err "配置备份失败，已取消保存。"
     return 1
   fi
 
-  write_config
-  say "配置已保存，正在重启服务..."
-  if restart_service; then
+  if [ -f "$RUN_SCRIPT" ]; then
+    run_backup=$(mktemp "${TMP_DIR}/run.sh.rollback.XXXXXX") || {
+      err "运行脚本备份失败，已取消保存。"
+      return 1
+    }
+    cp -p "$RUN_SCRIPT" "$run_backup" || {
+      rm -f "$run_backup"
+      err "运行脚本备份失败，已取消保存。"
+      return 1
+    }
+    had_run=1
+  fi
+
+  say "正在保存配置、更新运行脚本并重启服务..."
+  if write_config && create_run_script && restart_service_checked; then
+    [ -n "$run_backup" ] && rm -f "$run_backup"
     ok "服务已重启。"
     return 0
   fi
 
-  warn "服务重启失败，正在恢复上一份配置。"
+  warn "新配置未能正常启动，正在恢复原配置和运行脚本。"
   cp "$LAST_BACKUP_FILE" "$CONF_FILE" 2>/dev/null || true
-  restart_service >/dev/null 2>&1 || true
+  chmod 600 "$CONF_FILE" 2>/dev/null || true
+  if [ "$had_run" -eq 1 ]; then
+    cp -p "$run_backup" "$RUN_SCRIPT" 2>/dev/null || true
+  else
+    rm -f "$RUN_SCRIPT"
+  fi
+  [ -n "$run_backup" ] && rm -f "$run_backup"
+  if restart_service_checked; then
+    ok "已恢复原配置，服务运行正常。"
+  else
+    err "配置已恢复，但服务仍未正常运行，请查看日志。"
+  fi
   return 1
 }
 
 create_run_script() {
-  cat > "$RUN_SCRIPT" <<'EOF'
-#!/bin/sh
+  local tmp_run="${RUN_SCRIPT}.tmp.$$"
+  if ! {
+    printf '#!/bin/sh\n'
+    printf '# MiaoSpeed runtime template: %s\n' "$RUNTIME_TEMPLATE_VERSION"
+    cat <<'EOF'
 ulimit -n 65535 2>/dev/null
 CONF="/opt/miaospeed/miaospeed.conf"
 
@@ -800,6 +1177,14 @@ CONF="/opt/miaospeed/miaospeed.conf"
 
 _get() {
   sed -n "s/^$1=//p" "$CONF" | head -n 1 | sed -e 's/^"//' -e 's/"$//'
+}
+
+_is_yes() {
+  case "${1:-}" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+_is_no() {
+  case "${1:-}" in n|N|no|NO) return 0 ;; *) return 1 ;; esac
 }
 
 PORT=$(_get PORT)
@@ -811,10 +1196,26 @@ TASKLIMIT=$(_get TASKLIMIT)
 SPEEDLIMIT=$(_get SPEEDLIMIT)
 PAUSESECOND=$(_get PAUSESECOND)
 USE_MMDB=$(_get USE_MMDB)
+ENABLE_IPV6=$(_get ENABLE_IPV6)
+ENABLE_UPLOAD=$(_get ENABLE_UPLOAD)
+ENABLE_DOWNLOAD_SPEED=$(_get ENABLE_DOWNLOAD_SPEED)
+OUTBOUND_INTERFACE=$(_get OUTBOUND_INTERFACE)
+VERBOSE_LOG=$(_get VERBOSE_LOG)
+BIND_ADDRESS=$(_get BIND_ADDRESS)
+ALLOW_IPS=$(_get ALLOW_IPS)
+CLIENT_CA_FILE=$(_get CLIENT_CA_FILE)
+SERVER_PUBLIC_KEY_FILE=$(_get SERVER_PUBLIC_KEY_FILE)
+SERVER_PRIVATE_KEY_FILE=$(_get SERVER_PRIVATE_KEY_FILE)
+PPROF_ADDRESS=$(_get PPROF_ADDRESS)
 
-set -- server -mtls -verbose \
-  -bind "0.0.0.0:${PORT}" \
-  -allowip "0.0.0.0/0" \
+[ -n "$BIND_ADDRESS" ] || BIND_ADDRESS="0.0.0.0:${PORT}"
+[ -n "$ALLOW_IPS" ] || ALLOW_IPS="0.0.0.0/0"
+[ -n "$ENABLE_DOWNLOAD_SPEED" ] || ENABLE_DOWNLOAD_SPEED="y"
+[ -n "$VERBOSE_LOG" ] || VERBOSE_LOG="y"
+
+set -- server -mtls \
+  -bind "$BIND_ADDRESS" \
+  -allowip "$ALLOW_IPS" \
   -path "$PATH_WS" \
   -token "$TOKEN" \
   -connthread "$CONNTHREAD" \
@@ -822,7 +1223,16 @@ set -- server -mtls -verbose \
   -speedlimit "$SPEEDLIMIT" \
   -pausesecond "$PAUSESECOND"
 
+_is_yes "$VERBOSE_LOG" && set -- "$@" -verbose
+_is_yes "$ENABLE_IPV6" && set -- "$@" -ipv6
+_is_yes "$ENABLE_UPLOAD" && set -- "$@" -upload
+_is_no "$ENABLE_DOWNLOAD_SPEED" && set -- "$@" -nospeed
+[ -n "$OUTBOUND_INTERFACE" ] && set -- "$@" -interface "$OUTBOUND_INTERFACE"
 [ -n "$WHITELIST" ] && set -- "$@" -whitelist "$WHITELIST"
+[ -n "$CLIENT_CA_FILE" ] && set -- "$@" -clientca "$CLIENT_CA_FILE"
+[ -n "$SERVER_PUBLIC_KEY_FILE" ] && set -- "$@" -serverpublickey "$SERVER_PUBLIC_KEY_FILE"
+[ -n "$SERVER_PRIVATE_KEY_FILE" ] && set -- "$@" -serverprivatekey "$SERVER_PRIVATE_KEY_FILE"
+[ -n "$PPROF_ADDRESS" ] && set -- "$@" -pprof "$PPROF_ADDRESS"
 
 case "$USE_MMDB" in
   y|Y|yes|YES)
@@ -832,12 +1242,20 @@ esac
 
 exec /opt/miaospeed/miaospeed "$@"
 EOF
-  chmod +x "$RUN_SCRIPT"
+  } > "$tmp_run"; then
+    rm -f "$tmp_run"
+    return 1
+  fi
+  if chmod +x "$tmp_run" && mv -f "$tmp_run" "$RUN_SCRIPT"; then
+    return 0
+  fi
+  rm -f "$tmp_run"
+  return 1
 }
 
 create_service_files() {
   if [ "$SERVICE_MODE" -eq 1 ]; then
-    cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
+    if ! cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=MiaoSpeed Backend Service
 After=network.target
@@ -855,10 +1273,13 @@ StandardError=append:${LOG_DIR}/miaospeed-error.log
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
+    then
+      return 1
+    fi
+    systemctl daemon-reload || return 1
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || return 1
   else
-    cat > "/etc/init.d/${SERVICE_NAME}" <<EOF
+    if ! cat > "/etc/init.d/${SERVICE_NAME}" <<EOF
 #!/bin/sh /etc/rc.common
 START=95
 STOP=10
@@ -877,12 +1298,15 @@ start_service() {
     procd_close_instance
 }
 EOF
-    chmod +x "/etc/init.d/${SERVICE_NAME}"
-    /etc/init.d/"$SERVICE_NAME" enable
+    then
+      return 1
+    fi
+    chmod +x "/etc/init.d/${SERVICE_NAME}" || return 1
+    /etc/init.d/"$SERVICE_NAME" enable || return 1
   fi
 
   if command_exists logrotate; then
-    cat > /etc/logrotate.d/miaospeed <<EOF
+    if ! cat > /etc/logrotate.d/miaospeed <<EOF
 ${LOG_DIR}/*.log {
     daily
     rotate 3
@@ -894,12 +1318,19 @@ ${LOG_DIR}/*.log {
     copytruncate
 }
 EOF
+    then
+      warn "日志轮转配置写入失败，服务安装将继续。"
+    fi
   fi
+  return 0
 }
 
 create_update_script() {
-  cat > "$UPDATE_SCRIPT" <<'EOF'
-#!/bin/bash
+  local tmp_update="${UPDATE_SCRIPT}.tmp.$$"
+  if ! {
+    printf '#!/bin/bash\n'
+    printf '# MiaoSpeed runtime template: %s\n' "$RUNTIME_TEMPLATE_VERSION"
+    cat <<'EOF'
 set -euo pipefail
 
 DIR="/opt/miaospeed"
@@ -1091,7 +1522,30 @@ else
   exit 1
 fi
 EOF
-  chmod +x "$UPDATE_SCRIPT"
+  } > "$tmp_update"; then
+    rm -f "$tmp_update"
+    return 1
+  fi
+  if chmod +x "$tmp_update" && mv -f "$tmp_update" "$UPDATE_SCRIPT"; then
+    return 0
+  fi
+  rm -f "$tmp_update"
+  return 1
+}
+
+runtime_files_current() {
+  local marker="# MiaoSpeed runtime template: ${RUNTIME_TEMPLATE_VERSION}"
+  [ -f "$RUN_SCRIPT" ] && grep -Fqx "$marker" "$RUN_SCRIPT" \
+    && [ -f "$UPDATE_SCRIPT" ] && grep -Fqx "$marker" "$UPDATE_SCRIPT"
+}
+
+refresh_runtime_files() {
+  local force="${1:-}"
+  [ -f "$CONF_FILE" ] && [ -x "${INSTALL_DIR}/miaospeed" ] || return 0
+  if [ "$force" != "force" ] && runtime_files_current; then
+    return 0
+  fi
+  create_run_script && create_update_script
 }
 
 list_cron() {
@@ -1192,6 +1646,31 @@ restart_cron_status() {
   fi
 }
 
+effective_bind_address() {
+  printf '%s' "${BIND_ADDRESS:-0.0.0.0:${PORT}}"
+}
+
+configured_path_text() {
+  [ -n "${1:-}" ] && printf '%s' "$1" || printf '未配置'
+}
+
+service_status_short() {
+  if is_service_alive; then
+    printf '%b' "${C_G}运行中${C_0}"
+  elif [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ] || [ -x "/etc/init.d/${SERVICE_NAME}" ]; then
+    printf '%b' "${C_Y}已停止${C_0}"
+  else
+    printf '%b' "${C_R}未安装${C_0}"
+  fi
+}
+
+print_centered_title() {
+  local title="$1" display_width="$2" total_width="${3:-60}" left_padding
+  left_padding=$(( (total_width - display_width) / 2 ))
+  [ "$left_padding" -lt 0 ] && left_padding=0
+  printf '%*s%s\n' "$left_padding" '' "$title"
+}
+
 print_kv() {
   local label="$1" value="$2"
   case "$label" in
@@ -1207,6 +1686,7 @@ print_kv() {
     "快捷入口")       echo "  快捷入口           : ${value}" ;;
     "运行日志")       echo "  运行日志           : ${value}" ;;
     "监听端口")       echo "  监听端口           : ${value}" ;;
+    "监听地址")       echo "  监听地址           : ${value}" ;;
     "WebSocket 路径") echo "  WebSocket 路径     : ${value}" ;;
     "连接 Token")     echo "  连接 Token         : ${value}" ;;
     "BotID 白名单")   echo "  BotID 白名单       : ${value}" ;;
@@ -1214,6 +1694,12 @@ print_kv() {
     "任务队列上限")   echo "  任务队列上限       : ${value}" ;;
     "测速限速")       echo "  测速限速           : ${value}" ;;
     "任务间隔")       echo "  任务间隔           : ${value}" ;;
+    "IPv6 节点测试")  echo "  IPv6 节点测试      : ${value}" ;;
+    "上传测速")       echo "  上传测速           : ${value}" ;;
+    "下载测速")       echo "  下载测速           : ${value}" ;;
+    "出站接口")       echo "  出站接口           : ${value}" ;;
+    "详细日志")       echo "  详细日志           : ${value}" ;;
+    "入站 IP 白名单") echo "  入站 IP 白名单     : ${value}" ;;
     *)                echo "  ${label}: ${value}" ;;
   esac
 }
@@ -1270,19 +1756,33 @@ show_status_config() {
   echo
   echo "---------------- 连接参数 ----------------"
   print_kv "监听端口" "$PORT"
-  print_kv "WebSocket 路径" "$PATH_WS"
-  print_kv "连接 Token" "$TOKEN"
+  print_kv "WebSocket 路径" "已隐藏，可在“修改连接参数”中查看"
+  print_kv "连接 Token" "已隐藏，可在“修改连接参数”中查看"
 
   echo
   echo "---------------- 访问控制 ----------------"
   print_botid_whitelist_table
 
   echo
-  echo "---------------- 运行参数 ----------------"
+  echo "---------------- 运行与测试参数 ----------------"
   print_kv "最大并发数" "$CONNTHREAD"
   print_kv "任务队列上限" "$TASKLIMIT"
   print_kv "测速限速" "$speed_text"
   print_kv "任务间隔" "${PAUSESECOND} 秒"
+  print_kv "IPv6 节点测试" "$(yes_no_text "$ENABLE_IPV6")"
+  print_kv "上传测速" "$(yes_no_text "$ENABLE_UPLOAD")"
+  print_kv "下载测速" "$(yes_no_text "$ENABLE_DOWNLOAD_SPEED")"
+  print_kv "出站接口" "${OUTBOUND_INTERFACE:-自动选择}"
+  print_kv "详细日志" "$(yes_no_text "$VERBOSE_LOG")"
+
+  echo
+  echo "---------------- 高级网络、TLS 与诊断 ----------------"
+  print_kv "监听地址" "$(effective_bind_address)"
+  print_kv "入站 IP 白名单" "$ALLOW_IPS"
+  print_kv "客户端 CA" "$(configured_path_text "$CLIENT_CA_FILE")"
+  print_kv "服务端证书" "$(configured_path_text "$SERVER_PUBLIC_KEY_FILE")"
+  print_kv "服务端私钥" "$(configured_path_text "$SERVER_PRIVATE_KEY_FILE")"
+  print_kv "pprof" "$(configured_path_text "$PPROF_ADDRESS")"
 
   echo
   echo "---------------- 自动维护 ----------------"
@@ -1329,6 +1829,7 @@ edit_connection_params() {
 
   echo
   echo "---------------- 修改连接参数 ----------------"
+  [ -n "$BIND_ADDRESS" ] && warn "当前使用自定义监听地址 ${BIND_ADDRESS}；修改监听端口不会改变该地址。"
   read -r -p "监听端口 [当前 ${PORT}]: " input
   if [ -n "$input" ]; then
     validate_port "$input" || { err "端口必须是 1-65535 之间的数字。"; pause_menu; return; }
@@ -1528,7 +2029,7 @@ clear_whitelist_menu() {
 edit_access_control() {
   local choice
   while true; do
-    clear
+    clear_screen
     echo "=================================================="
     echo "                修改访问控制"
     echo "=================================================="
@@ -1554,14 +2055,84 @@ edit_access_control() {
   done
 }
 
+prompt_yes_no_setting() {
+  local variable="$1" label="$2" input current
+  current=$(yes_no_text "${!variable}")
+  read -r -p "${label} [当前 ${current}] (y/n，回车保持): " input
+  [ -z "$input" ] && return 0
+  if is_yes "$input"; then
+    printf -v "$variable" 'y'
+  elif is_no "$input"; then
+    printf -v "$variable" 'n'
+  else
+    err "请输入 y 或 n。"
+    return 1
+  fi
+}
+
+prompt_advanced_runtime_params() {
+  local input current_bind
+  current_bind="${BIND_ADDRESS:-默认 0.0.0.0:${PORT}}"
+
+  echo
+  echo "---------------- 高级网络与 TLS 参数 ----------------"
+  read -r -p "监听地址 [当前 ${current_bind}]（回车保持，- 恢复默认）: " input
+  if [ "$input" = "-" ]; then
+    BIND_ADDRESS=""
+  elif [ -n "$input" ]; then
+    validate_bind_address "$input" || { err "监听地址格式无效。"; return 1; }
+    BIND_ADDRESS="$input"
+  fi
+
+  read -r -p "入站 IP/CIDR 白名单 [当前 ${ALLOW_IPS}]: " input
+  if [ -n "$input" ]; then
+    validate_allow_ips "$input" || { err "入站 IP/CIDR 白名单格式无效。"; return 1; }
+    ALLOW_IPS="$input"
+  fi
+
+  read -r -p "客户端 CA 文件 [当前 ${CLIENT_CA_FILE:-未配置}]（回车保持，- 清空）: " input
+  if [ "$input" = "-" ]; then
+    CLIENT_CA_FILE=""
+  elif [ -n "$input" ]; then
+    validate_absolute_file_path "$input" || { err "客户端 CA 必须使用绝对路径。"; return 1; }
+    CLIENT_CA_FILE="$input"
+  fi
+
+  read -r -p "服务端证书文件 [当前 ${SERVER_PUBLIC_KEY_FILE:-未配置}]（回车保持，- 清空）: " input
+  if [ "$input" = "-" ]; then
+    SERVER_PUBLIC_KEY_FILE=""
+  elif [ -n "$input" ]; then
+    validate_absolute_file_path "$input" || { err "服务端证书必须使用绝对路径。"; return 1; }
+    SERVER_PUBLIC_KEY_FILE="$input"
+  fi
+
+  read -r -p "服务端私钥文件 [当前 ${SERVER_PRIVATE_KEY_FILE:-未配置}]（回车保持，- 清空）: " input
+  if [ "$input" = "-" ]; then
+    SERVER_PRIVATE_KEY_FILE=""
+  elif [ -n "$input" ]; then
+    validate_absolute_file_path "$input" || { err "服务端私钥必须使用绝对路径。"; return 1; }
+    SERVER_PRIVATE_KEY_FILE="$input"
+  fi
+
+  read -r -p "pprof 地址 [当前 ${PPROF_ADDRESS:-未配置}]（仅 loopback，回车保持，- 清空）: " input
+  if [ "$input" = "-" ]; then
+    PPROF_ADDRESS=""
+  elif [ -n "$input" ]; then
+    validate_pprof_address "$input" || { err "pprof 仅允许 127.0.0.1:端口或 [::1]:端口。"; return 1; }
+    PPROF_ADDRESS="$input"
+  fi
+}
+
 edit_runtime_params() {
-  local old_conn old_task old_speed old_pause input speed_gbps
+  local old_state new_state input speed_gbps
   load_config
-  old_conn="$CONNTHREAD"; old_task="$TASKLIMIT"; old_speed="$SPEEDLIMIT"; old_pause="$PAUSESECOND"
+  old_state=$(declare -p CONNTHREAD TASKLIMIT SPEEDLIMIT PAUSESECOND ENABLE_IPV6 ENABLE_UPLOAD \
+    ENABLE_DOWNLOAD_SPEED OUTBOUND_INTERFACE VERBOSE_LOG BIND_ADDRESS ALLOW_IPS CLIENT_CA_FILE \
+    SERVER_PUBLIC_KEY_FILE SERVER_PRIVATE_KEY_FILE PPROF_ADDRESS 2>/dev/null)
   speed_gbps=$(bytes_to_gbps "$SPEEDLIMIT")
 
   echo
-  echo "---------------- 修改运行参数 ----------------"
+  echo "---------------- 修改运行与测试参数 ----------------"
   read -r -p "最大并发数 [当前 ${CONNTHREAD}]: " input
   if [ -n "$input" ]; then
     validate_positive_uint "$input" || { err "最大并发数必须是大于 0 的整数。"; pause_menu; return; }
@@ -1586,11 +2157,34 @@ edit_runtime_params() {
     PAUSESECOND="$input"
   fi
 
-  if [ "$CONNTHREAD" = "$old_conn" ] \
-    && [ "$TASKLIMIT" = "$old_task" ] \
-    && [ "$SPEEDLIMIT" = "$old_speed" ] \
-    && [ "$PAUSESECOND" = "$old_pause" ]; then
-    echo "运行参数未变化。"
+  prompt_yes_no_setting ENABLE_IPV6 "启用 IPv6 节点测试" || { pause_menu; return; }
+  prompt_yes_no_setting ENABLE_UPLOAD "启用上传测速" || { pause_menu; return; }
+  prompt_yes_no_setting ENABLE_DOWNLOAD_SPEED "启用下载测速" || { pause_menu; return; }
+  prompt_yes_no_setting VERBOSE_LOG "启用详细日志" || { pause_menu; return; }
+
+  read -r -p "出站网络接口 [当前 ${OUTBOUND_INTERFACE:-自动选择}]（回车保持，- 清空）: " input
+  if [ "$input" = "-" ]; then
+    OUTBOUND_INTERFACE=""
+  elif [ -n "$input" ]; then
+    validate_interface_name "$input" || { err "出站接口名称包含非法字符。"; pause_menu; return; }
+    interface_exists "$input" || { err "未找到网络接口 ${input}。"; pause_menu; return; }
+    OUTBOUND_INTERFACE="$input"
+  fi
+
+  read -r -p "是否修改高级网络、TLS 与诊断参数? (y/N): " input
+  if is_yes "$input"; then
+    prompt_advanced_runtime_params || { pause_menu; return; }
+  elif [ -n "$input" ] && ! is_no "$input"; then
+    err "请输入 y 或 n。"
+    pause_menu
+    return
+  fi
+
+  new_state=$(declare -p CONNTHREAD TASKLIMIT SPEEDLIMIT PAUSESECOND ENABLE_IPV6 ENABLE_UPLOAD \
+    ENABLE_DOWNLOAD_SPEED OUTBOUND_INTERFACE VERBOSE_LOG BIND_ADDRESS ALLOW_IPS CLIENT_CA_FILE \
+    SERVER_PUBLIC_KEY_FILE SERVER_PRIVATE_KEY_FILE PPROF_ADDRESS 2>/dev/null)
+  if [ "$new_state" = "$old_state" ]; then
+    echo "运行与测试参数未变化。"
   else
     apply_config_and_restart
   fi
@@ -1611,6 +2205,11 @@ install_core_version() {
     err "指定版本下载或校验失败。"
     return 1
   }
+  if ! validate_core_flag_support "$binary_path"; then
+    rm -rf "$work_dir"
+    err "目标核心版本与当前运行参数不兼容，已取消切换。"
+    return 1
+  fi
 
   mkdir -p "$BACKUP_DIR"
   ts=$(date +%Y%m%d_%H%M%S)
@@ -1671,7 +2270,7 @@ install_core_version() {
 core_update_menu() {
   local choice latest_version input confirm current lock_after_install
   while true; do
-    clear
+    clear_screen
     echo "=================================================="
     echo "                检查喵速更新"
     echo "=================================================="
@@ -1823,6 +2422,10 @@ self_update() {
 
   if [ "$remote_version" = "$SCRIPT_VERSION" ]; then
     rm -f "$tmp"
+    if [ -f "$CONF_FILE" ] && [ -x "${INSTALL_DIR}/miaospeed" ]; then
+      refresh_runtime_files force \
+        || warn "管理脚本无需更新，但运行脚本同步失败；请检查目录权限。"
+    fi
     ok "管理脚本已是最新版: ${SCRIPT_VERSION}"
     return 0
   fi
@@ -1833,6 +2436,10 @@ self_update() {
     mv -f "$tmp" "$LOCAL_SCRIPT"
     chmod 700 "$LOCAL_SCRIPT"
     create_launcher
+    if [ -f "$CONF_FILE" ] && [ -x "${INSTALL_DIR}/miaospeed" ]; then
+      /bin/bash "$LOCAL_SCRIPT" --refresh-runtime >/dev/null 2>&1 \
+        || warn "管理脚本已更新，但运行脚本同步失败；请稍后运行 miao 重试。"
+    fi
     ok "管理脚本已更新到 ${remote_version}。"
     [ "$reload_menu" = "reload-menu" ] && return 111
     return 0
@@ -1890,7 +2497,7 @@ toggle_geoip() {
 auto_maintenance_menu() {
   local choice
   while true; do
-    clear
+    clear_screen
     echo "=================================================="
     echo "                自动维护设置"
     echo "=================================================="
@@ -1945,7 +2552,7 @@ auto_maintenance_menu() {
 backup_cleanup_menu() {
   local choice confirm count latest script_backup_text
   while true; do
-    clear
+    clear_screen
     count=$(find "$BACKUP_DIR" -type f -name "miaospeed.conf_*_bak" ! -name "*.botid_notes" 2>/dev/null | wc -l | awk '{print $1}')
     latest=$(latest_config_backup)
     script_backup_text="无"
@@ -2026,33 +2633,81 @@ backup_cleanup_menu() {
   done
 }
 
+service_control_action() {
+  local action="$1"
+  case "$action" in
+    start)
+      if is_service_alive; then
+        ok "喵速服务已在运行。"
+      elif start_service >/dev/null 2>&1 && wait_for_service_alive 5; then
+        ok "喵速服务已启动。"
+      else
+        err "喵速服务启动失败，请查看日志。"
+      fi
+      ;;
+    stop)
+      if ! is_service_alive; then
+        ok "喵速服务已处于停止状态。"
+      elif stop_service >/dev/null 2>&1 && wait_for_service_stopped 5; then
+        ok "喵速服务已停止。"
+      else
+        err "喵速服务未能正常停止，请查看进程状态。"
+      fi
+      ;;
+    restart)
+      if restart_service_checked; then
+        ok "喵速服务已重启。"
+      else
+        err "喵速服务重启失败，请查看日志。"
+      fi
+      ;;
+  esac
+  pause_menu
+}
+
 show_menu() {
-  clear
+  clear_screen
+  load_config
   echo "=================================================="
   echo "              喵速管理控制台"
   echo "=================================================="
+  echo "  服务: $(service_status_short) | 核心: $(current_core_version) | IPv6 测试: $(yes_no_text "$ENABLE_IPV6")"
+  echo "--------------------------------------------------"
+  echo "  [状态与服务]"
   printf "  %-3s %s\n" "1." "查看状态配置"
   printf "  %-3s %s\n" "2." "查看实时日志"
-  printf "  %-3s %s\n" "3." "修改连接参数"
-  printf "  %-3s %s\n" "4." "修改访问控制"
-  printf "  %-3s %s\n" "5." "修改运行参数"
-  printf "  %-3s %s\n" "6." "检查喵速更新"
-  printf "  %-3s %s\n" "7." "更新管理脚本"
-  printf "  %-3s %s\n" "8." "自动维护设置"
-  printf "  %-3s %s\n" "9." "备份与清理"
-  printf "  %-3s %s\n" "10." "卸载"
-  printf "  %-3s %s\n" "0." "退出"
+  printf "  %-3s %s\n" "3." "启动服务"
+  printf "  %-3s %s\n" "4." "停止服务"
+  printf "  %-3s %s\n" "5." "重启服务"
   echo "--------------------------------------------------"
-  echo "  喵速自动更新 : $(core_auto_update_status)"
-  echo "  脚本自动更新 : $(script_auto_update_status)"
-  echo "  喵速定时重启 : $(restart_cron_status)"
+  echo "  [配置修改]"
+  printf "  %-3s %s\n" "6." "修改连接参数"
+  printf "  %-3s %s\n" "7." "修改访问控制"
+  printf "  %-3s %s\n" "8." "修改运行与测试参数"
+  echo "--------------------------------------------------"
+  echo "  [更新与维护]"
+  printf "  %-3s %s\n" "9." "检查喵速更新"
+  printf "  %-3s %s\n" "10." "更新管理脚本"
+  printf "  %-3s %s\n" "11." "自动维护设置"
+  printf "  %-3s %s\n" "12." "备份与清理"
+  echo "--------------------------------------------------"
+  echo "  [危险操作]"
+  printf "  %-3s %s\n" "13." "卸载程序（保留配置）"
+  printf "  %-3s %s\n" "14." "彻底清除程序与配置"
+  echo "--------------------------------------------------"
+  printf "  %-3s %s\n" "0." "退出"
   echo "=================================================="
 }
 
 main_menu() {
   local choice action_status
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    err "管理控制台需要交互式终端，请在终端中运行 miao。"
+    return 1
+  fi
   detect_environment 1
   ensure_dirs
+  refresh_runtime_files || warn "运行脚本同步失败，当前服务文件保持不变。"
   while true; do
     trap main_menu_interrupt_handler INT TERM
     show_menu
@@ -2061,11 +2716,14 @@ main_menu() {
     case "$choice" in
       1) run_menu_action show_status_config_menu ;;
       2) run_menu_action view_logs_menu ;;
-      3) run_menu_action edit_connection_params ;;
-      4) run_menu_action edit_access_control ;;
-      5) run_menu_action edit_runtime_params ;;
-      6) run_menu_action core_update_menu ;;
-      7)
+      3) run_menu_action service_control_action start ;;
+      4) run_menu_action service_control_action stop ;;
+      5) run_menu_action service_control_action restart ;;
+      6) run_menu_action edit_connection_params ;;
+      7) run_menu_action edit_access_control ;;
+      8) run_menu_action edit_runtime_params ;;
+      9) run_menu_action core_update_menu ;;
+      10)
         run_menu_action script_update_menu
         action_status=$?
         if [ "$action_status" -eq 111 ]; then
@@ -2073,13 +2731,21 @@ main_menu() {
           exec /bin/bash "$LOCAL_SCRIPT" menu
         fi
         ;;
-      8) run_menu_action auto_maintenance_menu ;;
-      9) run_menu_action backup_cleanup_menu ;;
-      10)
-        run_menu_action uninstall_menu_action
+      11) run_menu_action auto_maintenance_menu ;;
+      12) run_menu_action backup_cleanup_menu ;;
+      13)
+        run_menu_action uninstall_menu_action keep-config
         action_status=$?
         if [ "$action_status" -eq 112 ]; then
-          uninstall_flow "full"
+          uninstall_flow "keep-config"
+          exit 0
+        fi
+        ;;
+      14)
+        run_menu_action uninstall_menu_action purge
+        action_status=$?
+        if [ "$action_status" -eq 113 ]; then
+          uninstall_flow "purge"
           exit 0
         fi
         ;;
@@ -2087,6 +2753,21 @@ main_menu() {
       *) echo "无效选项。"; pause_menu ;;
     esac
   done
+}
+
+prompt_maintenance_settings() {
+  echo -e "\n${C_B}=== 阶段四: 自动维护 ===${C_0}"
+  prompt_yes_no_setting USE_MMDB "下载并启用 GEOIP 数据库" || exit 1
+
+  if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
+    warn "当前已锁定喵速版本，已跳过喵速自动更新设置。"
+    ENABLE_CORE_AUTO_UPDATE="n"
+  else
+    prompt_yes_no_setting ENABLE_CORE_AUTO_UPDATE "启用每日 04:00 喵速自动更新" || exit 1
+  fi
+
+  prompt_yes_no_setting ENABLE_SCRIPT_AUTO_UPDATE "启用每日 03:30 管理脚本自动更新" || exit 1
+  prompt_yes_no_setting ENABLE_RESTART "启用每日 04:30 喵速定时重启" || exit 1
 }
 
 prompt_initial_config() {
@@ -2159,12 +2840,23 @@ prompt_initial_config() {
     done
   fi
 
-  echo -e "\n${C_Y}=== 阶段三: 运行参数 ===${C_0}"
-  read -r -p "是否手工配置运行参数? (y/N 默认: N): " input
+  echo -e "\n${C_Y}=== 阶段三: 运行与测试参数 ===${C_0}"
+  read -r -p "是否手工配置运行与测试参数? (y/N 默认: N): " input
   CONNTHREAD="$DEFAULT_CONN"
   TASKLIMIT=150
   SPEEDLIMIT=0
   PAUSESECOND=0
+  ENABLE_IPV6="y"
+  ENABLE_UPLOAD="n"
+  ENABLE_DOWNLOAD_SPEED="y"
+  OUTBOUND_INTERFACE=""
+  VERBOSE_LOG="y"
+  BIND_ADDRESS=""
+  ALLOW_IPS="0.0.0.0/0"
+  CLIENT_CA_FILE=""
+  SERVER_PUBLIC_KEY_FILE=""
+  SERVER_PRIVATE_KEY_FILE=""
+  PPROF_ADDRESS=""
 
   if is_yes "$input"; then
     read -r -p "最大并发数 [默认 ${DEFAULT_CONN}]: " input
@@ -2183,32 +2875,97 @@ prompt_initial_config() {
     read -r -p "任务间隔秒数 [默认 0]: " input
     PAUSESECOND="${input:-0}"
     validate_uint "$PAUSESECOND" || { err "任务间隔必须是非负整数。"; exit 1; }
+
+    prompt_yes_no_setting ENABLE_IPV6 "启用 IPv6 节点测试" || exit 1
+    prompt_yes_no_setting ENABLE_UPLOAD "启用上传测速" || exit 1
+    prompt_yes_no_setting ENABLE_DOWNLOAD_SPEED "启用下载测速" || exit 1
+    prompt_yes_no_setting VERBOSE_LOG "启用详细日志" || exit 1
+
+    read -r -p "出站网络接口（留空自动选择）: " input
+    if [ -n "$input" ]; then
+      validate_interface_name "$input" || { err "出站接口名称包含非法字符。"; exit 1; }
+      interface_exists "$input" || { err "未找到网络接口 ${input}。"; exit 1; }
+      OUTBOUND_INTERFACE="$input"
+    fi
+
+    read -r -p "是否配置高级网络、TLS 与诊断参数? (y/N): " input
+    if is_yes "$input"; then
+      prompt_advanced_runtime_params || exit 1
+    elif [ -n "$input" ] && ! is_no "$input"; then
+      err "请输入 y 或 n。"
+      exit 1
+    fi
   fi
 
-  echo -e "\n${C_B}=== 阶段四: 自动维护 ===${C_0}"
-  read -r -p "是否下载并启用 GEOIP 数据库? (y/N 默认: N): " input
-  USE_MMDB="${input:-n}"
+  validate_runtime_configuration || exit 1
+  USE_MMDB="n"
+  ENABLE_CORE_AUTO_UPDATE="n"
+  ENABLE_SCRIPT_AUTO_UPDATE="n"
+  ENABLE_RESTART="y"
+  prompt_maintenance_settings
+}
 
-  if [ "$CORE_UPDATE_POLICY" = "pinned" ]; then
-    warn "当前已锁定喵速版本，已跳过喵速自动更新设置。"
-    ENABLE_CORE_AUTO_UPDATE="n"
-  else
-    read -r -p "是否启用每日 04:00 喵速自动更新? (y/N 默认: N): " input
-    ENABLE_CORE_AUTO_UPDATE="${input:-n}"
+prepare_install_config() {
+  local latest_version="$1" input
+  if [ -f "$CONF_FILE" ]; then
+    HAD_CONFIG_BEFORE_INSTALL=1
+    echo
+    warn "检测到保留的配置文件: ${CONF_FILE}"
+    read -r -p "是否复用该配置重新安装? (Y/n 默认: Y): " input
+    if [ -z "$input" ] || is_yes "$input"; then
+      load_config
+      if [ "$CORE_UPDATE_POLICY" != "pinned" ] \
+        && { [ "$LATEST_VERSION_FALLBACK" -eq 0 ] || [ -z "$CORE_VERSION" ]; }; then
+        CORE_VERSION="$(normalize_core_version "$latest_version")"
+        CORE_UPDATE_POLICY="latest"
+      elif [ "$CORE_UPDATE_POLICY" != "pinned" ]; then
+        warn "最新版查询失败，将沿用保留配置中的核心版本 ${CORE_VERSION}。"
+      fi
+      validate_runtime_configuration || {
+        err "保留配置无效，请修正 ${CONF_FILE} 后重试，或重新安装时选择不复用。"
+        exit 1
+      }
+      ok "已载入保留配置；旧配置缺少 IPv6 开关时将继续保持关闭。"
+      ENABLE_CORE_AUTO_UPDATE="n"
+      ENABLE_SCRIPT_AUTO_UPDATE="n"
+      ENABLE_RESTART="y"
+      prompt_maintenance_settings
+      return 0
+    fi
+    if ! is_no "$input"; then
+      err "请输入 y 或 n。"
+      exit 1
+    fi
+    PENDING_BOTID_NOTES_FILE="${TMP_DIR}/botid_notes.pending.$$"
+    rm -f "$PENDING_BOTID_NOTES_FILE"
+    BOTID_NOTES_FILE="$PENDING_BOTID_NOTES_FILE"
+    ok "原配置已备份到 ${INSTALL_ROLLBACK_CONFIG}。"
   fi
-
-  read -r -p "是否启用每日 03:30 管理脚本自动更新? (y/N 默认: N): " input
-  ENABLE_SCRIPT_AUTO_UPDATE="${input:-n}"
-
-  read -r -p "是否启用每日 04:30 喵速定时重启? (Y/n 默认: Y): " input
-  ENABLE_RESTART="${input:-y}"
+  prompt_initial_config "$latest_version"
 }
 
 install_flow() {
   local latest_version work_dir binary_path
   require_root
+  HAD_CONFIG_BEFORE_INSTALL=0
+  [ -f "$CONF_FILE" ] && HAD_CONFIG_BEFORE_INSTALL=1
+  INSTALL_COMPLETED=0
+  INSTALL_CLEANUP_DONE=0
+  INSTALL_SKIP_AUTO_CLEANUP=0
+  INSTALL_ROLLBACK_CONFIG=""
+  LATEST_VERSION_FALLBACK=0
+  PENDING_BOTID_NOTES_FILE=""
+  BOTID_NOTES_FILE="$DEFAULT_BOTID_NOTES_FILE"
+  trap install_exit_handler EXIT
   trap install_interrupt_handler INT TERM
   ensure_dirs
+  if [ "$HAD_CONFIG_BEFORE_INSTALL" -eq 1 ]; then
+    if ! backup_config; then
+      err "安装前备份现有配置失败，已取消安装。"
+      exit 1
+    fi
+    INSTALL_ROLLBACK_CONFIG="$LAST_BACKUP_FILE"
+  fi
   detect_environment
   install_local_script
   install_dependencies
@@ -2217,13 +2974,14 @@ install_flow() {
   say "获取喵速最新版本..."
   latest_version=$(get_latest_core_version || true)
   if [ -z "$latest_version" ]; then
-    warn "获取最新版本失败，回退至默认版本 4.6.1。"
+    warn "获取最新版本失败；新安装将回退至 4.6.1，复用配置时优先沿用记录版本。"
     latest_version="4.6.1"
+    LATEST_VERSION_FALLBACK=1
   else
     ok "最新版本: ${latest_version}"
   fi
 
-  prompt_initial_config "$latest_version"
+  prepare_install_config "$latest_version"
 
   work_dir="${TMP_DIR}/install-work"
   binary_path=$(download_core_to_workdir "$CORE_VERSION" "$work_dir") || {
@@ -2231,6 +2989,12 @@ install_flow() {
     trap - INT TERM
     exit 1
   }
+  if ! validate_core_flag_support "$binary_path"; then
+    rm -rf "$work_dir"
+    err "所选核心版本与当前运行参数不兼容。"
+    trap - INT TERM
+    exit 1
+  fi
 
   if is_yes "$USE_MMDB"; then
     if ! download_mmdb; then
@@ -2240,10 +3004,16 @@ install_flow() {
   fi
 
   say "写入配置与服务文件..."
-  write_config
-  create_run_script
-  create_update_script
-  create_service_files
+  if ! write_config || ! create_run_script || ! create_update_script; then
+    err "写入配置或运行脚本失败，请检查磁盘空间和目录权限。"
+    trap - INT TERM
+    exit 1
+  fi
+  if ! create_service_files; then
+    err "系统服务文件创建或启用失败。"
+    trap - INT TERM
+    exit 1
+  fi
 
   stop_service >/dev/null 2>&1 || true
   if ! cp "$binary_path" "${INSTALL_DIR}/miaospeed"; then
@@ -2256,8 +3026,7 @@ install_flow() {
 
   say "启动喵速服务..."
   if start_service; then
-    sleep 3
-    if is_service_alive; then
+    if wait_for_service_alive 6; then
       ok "喵速服务已启动。"
     else
       err "服务启动命令已执行，但健康检查未通过，请查看日志。"
@@ -2280,18 +3049,26 @@ install_flow() {
     enable_restart_cron >/dev/null 2>&1 || true
   fi
 
+  if ! commit_pending_botid_notes; then
+    warn "新配置已生效，但 BotID 备注写入失败；原备注仍保留在 ${DEFAULT_BOTID_NOTES_FILE}。"
+    discard_pending_botid_notes
+  fi
+
+  INSTALL_COMPLETED=1
+  trap - EXIT INT TERM
   show_install_summary
-  trap - INT TERM
 }
 
 show_install_summary() {
-  local mmdb_text speed_text
+  local mmdb_text speed_text tls_text
   mmdb_text="未启用"
   is_yes "$USE_MMDB" && mmdb_text="已启用 (${DATA_DIR})"
   speed_text=$(format_speed_text "$SPEEDLIMIT")
+  tls_text="未配置"
+  [ -n "$SERVER_PUBLIC_KEY_FILE" ] && tls_text="已配置"
 
   echo -e "\n${C_G}============================================================${C_0}"
-  echo -e " 喵速部署完成"
+  print_centered_title "喵速部署完成" 12 60
   echo -e "${C_G}============================================================${C_0}"
 
   echo -e " ${C_B}[连接参数]${C_0}"
@@ -2304,11 +3081,24 @@ show_install_summary() {
   print_botid_whitelist_table
 
   echo
-  echo -e " ${C_B}[运行参数]${C_0}"
+  echo -e " ${C_B}[运行与测试参数]${C_0}"
   echo -e " - 最大并发数      : ${CONNTHREAD}"
   echo -e " - 任务队列上限    : ${TASKLIMIT}"
   echo -e " - 测速限速        : ${speed_text}"
   echo -e " - 任务间隔        : ${PAUSESECOND} 秒"
+  echo -e " - IPv6 节点测试   : $(yes_no_text "$ENABLE_IPV6")"
+  echo -e " - 上传测速        : $(yes_no_text "$ENABLE_UPLOAD")"
+  echo -e " - 下载测速        : $(yes_no_text "$ENABLE_DOWNLOAD_SPEED")"
+  echo -e " - 出站接口        : ${OUTBOUND_INTERFACE:-自动选择}"
+  echo -e " - 详细日志        : $(yes_no_text "$VERBOSE_LOG")"
+
+  echo
+  echo -e " ${C_B}[高级网络、TLS 与诊断]${C_0}"
+  echo -e " - 监听地址        : $(effective_bind_address)"
+  echo -e " - 入站 IP 白名单 : ${ALLOW_IPS}"
+  echo -e " - 客户端 CA       : $(configured_path_text "$CLIENT_CA_FILE")"
+  echo -e " - 自定义服务证书  : ${tls_text}"
+  echo -e " - pprof           : $(configured_path_text "$PPROF_ADDRESS")"
 
   echo
   echo -e " ${C_B}[自动维护]${C_0}"
@@ -2326,17 +3116,22 @@ show_install_summary() {
   echo -e " ${C_B}[管理入口]${C_0}"
   echo -e " - 快捷菜单        : ${C_G}miao${C_0}"
   echo -e " - 本地脚本        : ${LOCAL_SCRIPT}"
-  echo -e " - 手动卸载        : bash ${LOCAL_SCRIPT} --uninstall"
+  echo -e " - 保留配置卸载    : bash ${LOCAL_SCRIPT} --uninstall"
+  echo -e " - 彻底清除        : bash ${LOCAL_SCRIPT} --purge"
   echo -e " - 运行日志        : ${LOG_DIR}/miaospeed.log"
   echo -e "${C_G}============================================================${C_0}"
-  echo -e " ${C_R}[!] 请确认云安全组或本机防火墙已放行 TCP 端口 ${PORT}${C_0}"
+  if [ -z "$BIND_ADDRESS" ]; then
+    echo -e " ${C_R}[!] 请确认云安全组或本机防火墙已放行 TCP 端口 ${PORT}${C_0}"
+  else
+    echo -e " ${C_R}[!] 请按自定义监听地址 ${BIND_ADDRESS} 检查防火墙与访问路径${C_0}"
+  fi
   echo -e "${C_G}============================================================${C_0}"
 }
 
 uninstall_flow() {
-  local mode="${1:-full}"
+  local mode="${1:-keep-config}" quiet="${2:-}"
   require_root
-  say "开始卸载喵速..."
+  [ "$quiet" = "quiet" ] || say "开始卸载喵速..."
 
   systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
@@ -2355,14 +3150,24 @@ uninstall_flow() {
   disable_script_auto_update >/dev/null 2>&1 || true
   disable_restart_cron >/dev/null 2>&1 || true
 
-  rm -rf "$INSTALL_DIR"
-  rm -f "$LAUNCHER" /usr/local/bin/miao /etc/logrotate.d/miaospeed
+  rm -f /etc/logrotate.d/miaospeed /usr/local/bin/miao
 
-  if [ "$mode" = "full" ]; then
+  if [ "$mode" = "purge" ]; then
+    rm -rf "$INSTALL_DIR"
+    rm -f "$LAUNCHER"
     rm -f "$LOCAL_SCRIPT" "$LOCAL_SCRIPT_BAK"
+    [ "$quiet" = "quiet" ] || ok "喵速程序、配置、备份和管理脚本已彻底清除。"
+  else
+    rm -f "${INSTALL_DIR}/miaospeed" "${INSTALL_DIR}/miaospeed.new" "$RUN_SCRIPT" "$UPDATE_SCRIPT"
+    rm -rf "$TMP_DIR" "$LOG_DIR"
+    rm -f "${DATA_DIR}/GeoLite2-ASN.mmdb" "${DATA_DIR}/GeoLite2-City.mmdb"
+    rmdir "$DATA_DIR" 2>/dev/null || true
+    [ "$quiet" = "quiet" ] || {
+      ok "喵速程序已卸载。"
+      echo "已保留: ${CONF_FILE}、${BOTID_NOTES_FILE}、${BACKUP_DIR}"
+      echo "重新安装: miao 或 bash ${LOCAL_SCRIPT}"
+    }
   fi
-
-  ok "喵速已卸载。"
 }
 
 ensure_installed_or_offer() {
@@ -2385,7 +3190,8 @@ usage() {
   bash $0                 首次安装；已安装时进入菜单
   bash $0 menu            打开管理菜单
   bash $0 --self-update   更新本地管理脚本
-  bash $0 --uninstall     卸载喵速
+  bash $0 --uninstall     卸载程序并保留配置
+  bash $0 --purge         彻底清除程序、配置和管理脚本
 
 安装后可直接输入:
   miao
@@ -2411,7 +3217,25 @@ main() {
       self_update
       ;;
     --uninstall)
-      uninstall_flow "full"
+      uninstall_flow "keep-config"
+      ;;
+    --purge)
+      if confirm_purge; then
+        uninstall_flow "purge"
+      else
+        echo "已取消。"
+      fi
+      ;;
+    --refresh-runtime)
+      if [ ! -f "$CONF_FILE" ] || [ ! -x "${INSTALL_DIR}/miaospeed" ]; then
+        err "未检测到完整安装，无法同步运行脚本。"
+        exit 1
+      fi
+      ensure_dirs
+      refresh_runtime_files force || {
+        err "运行脚本同步失败。"
+        exit 1
+      }
       ;;
     -h|--help)
       usage

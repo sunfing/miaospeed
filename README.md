@@ -47,14 +47,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/Insta
 - 自动生成监听端口、WebSocket 路径和连接 Token
 - 支持 Linux AMD64 / ARM64，以及 Debian、Ubuntu、OpenWrt 等环境
 - 自动识别 `systemd` 与 OpenWrt `procd`
-- 通过 `miao` 查看状态、实时日志并修改连接与运行参数
+- 通过 `miao` 查看状态、实时日志，启动、停止或重启服务
+- 可配置 IPv6 节点测试、上传/下载测速、出站接口和详细日志
+- 提供监听地址、入站 IP 白名单、自定义 TLS 证书和本地 pprof 等高级设置
 - 管理 BotID 白名单及本地备注
 - 更新 MiaoSpeed 核心和管理脚本
 - 安装指定核心版本并支持版本锁定
 - 可选的核心自动更新、脚本自动更新和定时重启
 - 配置备份、恢复、清理，以及更新失败自动回滚
-- 安装中断清理和完整卸载
+- 默认卸载保留配置、备注和备份，另提供二次确认的彻底清除
 - 可选下载并启用 GeoIP 数据库
+
+新安装默认开启 IPv6 节点测试，上传测速默认关闭，下载测速和详细日志默认开启。旧安装升级后，如果原配置中没有 `ENABLE_IPV6`，会继续保持 IPv6 节点测试关闭，避免静默改变既有行为。
+
+> [!NOTE]
+> `ENABLE_IPV6` 控制的是 IPv6 节点测试能力，不会自动开放 IPv6 入站访问。入站监听和准入范围分别由监听地址与 `ALLOW_IPS` 控制。
 
 ## 管理命令
 
@@ -63,21 +70,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/Insta
 | `miao` | 打开管理控制台 |
 | `bash /root/miaospeed.sh menu` | 打开管理控制台 |
 | `bash /root/miaospeed.sh --self-update` | 更新本地管理脚本 |
-| `bash /root/miaospeed.sh --uninstall` | 卸载服务并删除相关文件 |
+| `bash /root/miaospeed.sh --uninstall` | 卸载程序并保留配置、备注和备份 |
+| `bash /root/miaospeed.sh --purge` | 二次确认后彻底清除程序、配置和管理脚本 |
 | `bash /root/miaospeed.sh --help` | 查看命令帮助 |
 
-管理控制台提供以下入口：
+管理控制台采用单层菜单，并按用途进行视觉分组：
 
-1. 查看状态配置
-2. 查看实时日志
-3. 修改连接参数
-4. 修改访问控制
-5. 修改运行参数
-6. 检查 MiaoSpeed 更新
-7. 更新管理脚本
-8. 自动维护设置
-9. 备份与清理
-10. 卸载
+| 分组 | 菜单入口 |
+| --- | --- |
+| 状态与服务 | `1` 查看状态配置、`2` 查看实时日志、`3` 启动服务、`4` 停止服务、`5` 重启服务 |
+| 配置修改 | `6` 修改连接参数、`7` 修改访问控制、`8` 修改运行与测试参数 |
+| 更新与维护 | `9` 检查 MiaoSpeed 更新、`10` 更新管理脚本、`11` 自动维护设置、`12` 备份与清理 |
+| 危险操作 | `13` 卸载程序（保留配置）、`14` 彻底清除程序与配置 |
+| 退出 | `0` 退出 |
+
+运行与测试参数中的高级设置只有在用户确认后才会展开。自定义服务端证书与私钥必须成对配置；pprof 只允许绑定 `127.0.0.1` 或 `[::1]`。
 
 ## 安装内容
 
@@ -87,6 +94,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/Insta
 | --- | --- |
 | `/opt/miaospeed/miaospeed` | MiaoSpeed 核心程序 |
 | `/opt/miaospeed/miaospeed.conf` | 运行配置 |
+| `/opt/miaospeed/botid_notes.tsv` | BotID 本地备注 |
+| `/opt/miaospeed/run.sh` | 根据配置生成的服务启动脚本 |
+| `/opt/miaospeed/update.sh` | 核心自动更新脚本 |
 | `/opt/miaospeed/log/` | 运行与更新日志 |
 | `/opt/miaospeed/backup/` | 配置及核心备份 |
 | `/root/miaospeed.sh` | 本地管理脚本 |
@@ -94,11 +104,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/Insta
 
 根据安装时的选择，脚本还可能创建系统服务、`cron` 定时任务、日志轮转配置，并下载 GeoIP 数据库。
 
+执行新版 `--uninstall` 后会保留 `miaospeed.conf`、`botid_notes.tsv`、`backup/`、`/root/miaospeed.sh` 和 `miao` 入口；再次运行 `miao` 时可选择复用保留配置重新安装。运行日志、核心程序和脚本生成的 GeoIP 数据库不会保留。`--purge` 则会在两次确认后删除整个 `/opt/miaospeed`、本地管理脚本及快捷入口。
+
 ## 安全提示
 
 - 脚本需要 `root` 权限，会安装依赖、创建系统服务并可能修改 `crontab`；运行前建议先审阅[当前脚本源码](InstallMiaoSpeed/miaospeed.sh)。
 - BotID 白名单留空时表示允许所有 BotID 连接。公开部署时请配置访问控制，并同时使用复杂的 WebSocket 路径和 Token。
-- Token 会在本机管理界面中显示。请妥善保护终端记录、`/opt/miaospeed/miaospeed.conf` 及其备份。
+- 普通状态页会遮蔽 WebSocket 路径和 Token；首次部署摘要及“修改连接参数”界面仍会显示完整值。请妥善保护终端记录、`/opt/miaospeed/miaospeed.conf` 及其备份。
 - 管理脚本自更新默认跟随本仓库 `main` 分支；核心程序则从上游 Releases 获取。
 
 ## 部署方式
