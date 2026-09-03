@@ -129,7 +129,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sunfing/miaospeed/main/Insta
 
 ## 相关链接
 
-- [当前推荐脚本说明](https://t.me/i_chl/353)
+- [当前推荐脚本说明与更新记录](https://t.me/i_chl/392)
 - [旧版二进制部署说明](https://t.me/i_chl/244)
 - [Docker Compose 部署说明](https://t.me/i_chl/88)
 - [MiaoSpeed 上游仓库](https://github.com/airportr/miaospeed)
